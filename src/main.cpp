@@ -13,12 +13,13 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "chess-rules/generator.hpp"
+#include "chess-rules/rules.hpp"
 
-namespace {
-
-[[noreturn]] void usage(const char* msg = nullptr) {
+[[noreturn]] void exit_with_message(const char* msg = nullptr) {
     if (msg) {
         std::cerr << "error: " << msg << "\n\n";
     }
@@ -30,130 +31,145 @@ namespace {
                  "  --min-play-share X         minimum share of iterations on plain random play (default 0.25)\n"
                  "  --no-shuffle               keep generation order\n"
                  "  --verbose\n";
-    std::exit(msg ? 1 : 0);
+    std::exit(msg ? EXIT_FAILURE : EXIT_SUCCESS);
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    using namespace nw;
-
+struct Args {
     std::filesystem::path out_path;
-    std::uint64_t per_kind = 0, seed = 1;
-    int split       = 0;
-    Variant variant = Variant::MIXED;
-    int threads     = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-    bool shuffle = true, verbose = false;
-    double play_share = 0.25;
+    std::uint64_t per_kind = 0;
+    std::uint64_t seed     = 1;
+    int split              = 0;
+    nw::Variant variant    = nw::Variant::MIXED;
+    int threads            = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+    bool shuffle           = true;
+    bool verbose           = false;
+    double play_share      = 0.25;
+};
+
+Args parse_args(int argc, char** argv) {
+    Args args;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        auto next           = [&]() -> std::string {
+
+        auto next = [&]() -> std::string {
             if (i + 1 >= argc) {
-                usage("missing value");
+                exit_with_message("missing value");
             }
             return argv[++i];
         };
+
         if (a == "--out") {
-            out_path = next();
+            args.out_path = next();
         } else if (a == "--samples-per-kind") {
-            per_kind = std::stoull(next());
+            args.per_kind = std::stoull(next());
         } else if (a == "--seed") {
-            seed = std::stoull(next());
+            args.seed = std::stoull(next());
         } else if (a == "--threads") {
-            threads = std::max(1, std::stoi(next()));
+            args.threads = std::max(1, std::stoi(next()));
         } else if (a == "--split") {
             const std::string v = next();
-            split               = v == "train" ? 0 : (v == "val" ? 1 : (v == "test" ? 2 : -1));
-            if (split < 0) {
-                usage("split must be train, val or test");
+            args.split          = v == "train" ? 0 : (v == "val" ? 1 : (v == "test" ? 2 : -1));
+            if (args.split < 0) {
+                exit_with_message("split must be train, val or test");
             }
         } else if (a == "--variant") {
             const std::string v = next();
-            variant = v == "standard" ? Variant::STANDARD : (v == "960" ? Variant::CHESS960 : Variant::MIXED);
+            args.variant =
+                v == "standard" ? nw::Variant::STANDARD : (v == "960" ? nw::Variant::CHESS960 : nw::Variant::MIXED);
             if (v != "standard" && v != "960" && v != "mixed") {
-                usage("variant must be standard, 960 or mixed");
+                exit_with_message("variant must be standard, 960 or mixed");
             }
         } else if (a == "--min-play-share") {
-            play_share = std::stod(next());
+            args.play_share = std::stod(next());
         } else if (a == "--no-shuffle") {
-            shuffle = false;
+            args.shuffle = false;
         } else if (a == "--verbose") {
-            verbose = true;
+            args.verbose = true;
         } else if (a == "--help" || a == "-h") {
-            usage();
+            exit_with_message();
         } else {
-            usage(("unknown option " + a).c_str());
+            exit_with_message(("unknown option " + a).c_str());
         }
     }
-    if (out_path.empty() || per_kind == 0) {
-        usage("--out and --samples-per-kind are required");
+
+    if (args.out_path.empty() || args.per_kind == 0) {
+        exit_with_message("--out and --samples-per-kind are required");
     }
-    threads = static_cast<int>(std::min<std::uint64_t>(threads, per_kind));
 
-    const auto starts = split_chess960_starts(0)[split];
+    args.threads = static_cast<int>(std::min<std::uint64_t>(args.threads, args.per_kind));
 
-    const auto t0 = std::chrono::steady_clock::now();
-    std::vector<std::vector<Example>> parts(threads);
-    std::vector<Stats> stats(threads);
+    return args;
+}
+
+std::pair<std::vector<nw::Example>, nw::Stats> run(const Args& args) {
+    const auto starts = split_chess960_starts(0)[args.split];
+
+    std::vector<std::vector<nw::Example>> parts(args.threads);
+    std::vector<nw::Stats> stats(args.threads);
     std::vector<std::thread> pool;
-    for (int t = 0; t < threads; ++t) {
+    for (int t = 0; t < args.threads; ++t) {
         pool.emplace_back([&, t] {
-            Config cfg;
-            cfg.kind_target = per_kind / threads + (static_cast<std::uint64_t>(t) < per_kind % threads ? 1 : 0);
-            cfg.seed        = seed * 0x9E3779B97F4A7C15ull + static_cast<std::uint64_t>(t) * 0xD1B54A32D192ED03ull + 1;
-            cfg.split       = split;
-            cfg.variant     = variant;
-            cfg.starts      = starts;
-            cfg.min_play_share = play_share;
-            cfg.verbose        = verbose && t == 0;
-            Shard shard(cfg);
+            nw::Config cfg;
+            cfg.kind_target =
+                args.per_kind / args.threads + (static_cast<std::uint64_t>(t) < args.per_kind % args.threads ? 1 : 0);
+            cfg.seed    = args.seed * 0x9E3779B97F4A7C15ull + static_cast<std::uint64_t>(t) * 0xD1B54A32D192ED03ull + 1;
+            cfg.split   = args.split;
+            cfg.variant = args.variant;
+            cfg.starts  = starts;
+            cfg.min_play_share = args.play_share;
+            cfg.verbose        = args.verbose && t == 0;
+            nw::Shard shard(cfg);
             shard.run(parts[t]);
             stats[t] = shard.stats();
         });
     }
+
     for (auto& th : pool) {
         th.join();
     }
 
-    std::vector<Example> all;
-    all.reserve(per_kind * NUM_KINDS);
-    Stats total;
-    for (int t = 0; t < threads; ++t) {
+    std::vector<nw::Example> all;
+    all.reserve(args.per_kind * nw::NUM_KINDS);
+    nw::Stats total;
+    for (int t = 0; t < args.threads; ++t) {
         all.insert(all.end(), parts[t].begin(), parts[t].end());
         total.merge(stats[t]);
-        std::vector<Example>().swap(parts[t]);
+        std::vector<nw::Example>().swap(parts[t]);
     }
-    if (shuffle) {
-        Rng rng(seed ^ 0xABCDEF);
+
+    if (args.shuffle) {
+        nw::Rng rng(args.seed ^ 0xABCDEF);
         for (std::size_t i = all.size() - 1; i > 0; --i) {
             std::swap(all[i], all[rng.below(static_cast<std::uint32_t>(i + 1))]);
         }
     }
 
-    {
-        std::ofstream f(out_path, std::ios::binary);
-        if (!f) {
-            usage("cannot open output file");
-        }
-        f.write(reinterpret_cast<const char*>(all.data()), static_cast<std::streamsize>(all.size() * sizeof(Example)));
+    return {all, total};
+}
+
+void write_bin(const std::filesystem::path& path, const std::vector<nw::Example>& examples) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
+        exit_with_message("cannot open output file");
     }
+    f.write(reinterpret_cast<const char*>(examples.data()),
+            static_cast<std::streamsize>(examples.size() * sizeof(nw::Example)));
+}
 
-    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-
-    std::filesystem::path json_path = out_path;
-    json_path.replace_extension("json");
-    std::ofstream j(json_path);
-    j << "{\n  \"record_bytes\": 80,\n  \"examples\": " << all.size() << ",\n  \"seed\": " << seed
+void write_json(const std::filesystem::path& path, const Args& args, const nw::Stats stats,
+                const std::size_t num_examples, const double secs) {
+    std::ofstream j(path);
+    j << "{\n  \"record_bytes\": 80,\n  \"examples\": " << num_examples << ",\n  \"seed\": " << args.seed
       << ",\n  \"split\": \""
-      << (split == 0   ? "train"
-          : split == 1 ? "val"
-                       : "test")
+      << (args.split == 0   ? "train"
+          : args.split == 1 ? "val"
+                            : "test")
       << "\",\n  \"variant\": \""
-      << (variant == Variant::STANDARD   ? "standard"
-          : variant == Variant::CHESS960 ? "960"
-                                         : "mixed")
-      << "\",\n  \"threads\": " << threads << ",\n  \"seconds\": " << secs << ",\n";
+      << (args.variant == nw::Variant::STANDARD   ? "standard"
+          : args.variant == nw::Variant::CHESS960 ? "960"
+                                                  : "mixed")
+      << "\",\n  \"threads\": " << args.threads << ",\n  \"seconds\": " << secs << ",\n";
     j << "  \"layout\": {\n"
          "    \"bitboards\": \"uint64[9]: white, black, pawns, knights, bishops, rooks, queens, kings, castling rooks; "
          "bit i = square i, a1 = 0, h1 = 7, a8 = 56\",\n"
@@ -164,28 +180,42 @@ int main(int argc, char** argv) {
          "    \"white_to_move\": \"uint8\",\n"
          "    \"legal_kind, illegal_reason\": \"uint8 bucket ids, names below\"\n  },\n";
     j << "  \"kinds\": {";
-    for (int k = 0; k < NUM_KINDS; ++k) {
-        j << (k ? ", " : "") << "\"" << kind_name(k) << "\": " << total.kind[k];
+    for (int k = 0; k < nw::NUM_KINDS; ++k) {
+        j << (k ? ", " : "") << "\"" << nw::kind_name(k) << "\": " << stats.kind[k];
     }
     j << "},\n  \"reasons\": {";
-    for (int r = 0; r < NUM_REASONS; ++r) {
-        j << (r ? ", " : "") << "\"" << reason_name(r) << "\": " << total.reason[r];
+    for (int r = 0; r < nw::NUM_REASONS; ++r) {
+        j << (r ? ", " : "") << "\"" << nw::reason_name(r) << "\": " << stats.reason[r];
     }
     j << "},\n  \"kind_names\": [";
-    for (int k = 0; k < NUM_KINDS; ++k) {
-        j << (k ? ", " : "") << "\"" << kind_name(k) << "\"";
+    for (int k = 0; k < nw::NUM_KINDS; ++k) {
+        j << (k ? ", " : "") << "\"" << nw::kind_name(k) << "\"";
     }
     j << "],\n  \"reason_names\": [";
-    for (int r = 0; r < NUM_REASONS; ++r) {
-        j << (r ? ", " : "") << "\"" << reason_name(r) << "\"";
+    for (int r = 0; r < nw::NUM_REASONS; ++r) {
+        j << (r ? ", " : "") << "\"" << nw::reason_name(r) << "\"";
     }
     j << "],\n  \"examples_by_source\": {";
-    for (int s = 0; s < Shard::NUM_SOURCES; ++s) {
-        j << (s ? ", " : "") << "\"" << Shard::source_name(s) << "\": " << total.source_examples[s];
+    for (int s = 0; s < nw::Shard::NUM_SOURCES; ++s) {
+        j << (s ? ", " : "") << "\"" << nw::Shard::source_name(s) << "\": " << stats.source_examples[s];
     }
     j << "}\n}\n";
+}
 
-    std::cerr << "wrote " << all.size() << " examples to " << out_path << " in " << secs << " s ("
-              << static_cast<std::uint64_t>(all.size() / secs) << " examples/s)\n";
-    return 0;
+int main(int argc, char** argv) {
+    Args args = parse_args(argc, argv);
+
+    const auto t0                = std::chrono::steady_clock::now();
+    const auto [examples, stats] = run(args);
+    write_bin(args.out_path, examples);
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    std::filesystem::path json_path = args.out_path;
+    json_path.replace_extension("json");
+    write_json(json_path, args, stats, examples.size(), secs);
+
+    std::cerr << "wrote " << examples.size() << " examples to " << args.out_path << " in " << secs << " s ("
+              << static_cast<std::uint64_t>(examples.size() / secs) << " examples/s)\n";
+
+    return EXIT_SUCCESS;
 }
