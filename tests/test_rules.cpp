@@ -1,5 +1,4 @@
 #include <catch2/catch_test_macros.hpp>
-#include <set>
 #include <string>
 
 #include "chess-rules/chess960.hpp"
@@ -321,6 +320,41 @@ TEST_CASE("a position without any pseudo-legal move is a stalemate that still ge
     REQUIRE_FALSE(position.analysis.in_check);
     REQUIRE(position.analysis.kind_available(nw::RESIGN));
     REQUIRE_FALSE(position.analysis.kind_available(nw::KING));
+}
+
+TEST_CASE("legal play never reaches a position the library mishandles", "[rules][slow]") {
+    nw::Rng rng(2024);
+    nw::Analysis analysis;
+    long double_checks = 0;
+    long untrusted     = 0;
+
+    for (int game = 0; game < 3000; ++game) {
+        chess::Board board(chess960_fen(static_cast<int>(rng.below(960))), true);
+        for (int ply = 0; ply < 120; ++ply) {
+            analysis.analyze_legal(board);
+            if (analysis.in_check) {
+                double_checks += board.checkers().count() == 2;
+                untrusted += !analysis.trusted;
+            }
+            if (analysis.no_moves) {
+                break;
+            }
+
+            // prefer checking moves so that double checks actually occur
+            chess::Move pick = analysis.legal[rng.below(static_cast<std::uint32_t>(analysis.legal.size()))];
+            for (int attempt = 0; attempt < 6; ++attempt) {
+                const chess::Move move = analysis.legal[rng.below(static_cast<std::uint32_t>(analysis.legal.size()))];
+                if (board.givesCheck(move) != chess::CheckType::NO_CHECK) {
+                    pick = move;
+                    break;
+                }
+            }
+            board.makeMove(pick);
+        }
+    }
+
+    REQUIRE(double_checks > 0);  // the test can see double checks at all
+    REQUIRE(untrusted == 0);
 }
 
 TEST_CASE("positions the library mishandles are flagged as untrusted", "[rules]") {
