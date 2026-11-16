@@ -5,8 +5,10 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <vector>
 
 #include "chess.hpp"
@@ -60,33 +62,81 @@ inline int pick_bit(std::uint64_t bits, Rng& rng) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Move code: to (bits 0-5) | from (6-11) | promotion piece (12-14: 0 none, 1 N, 2 B, 3 R, 4 Q).
-// Castling is king -> own rook (Chess960 style). En passant is the plain diagonal from/to.
-// RESIGN is b1->b1 (65): it is never a legal "ordinary" move and is never used as an illegal one.
+// A move as the dataset and the network see it: from square, to square and promotion piece.
+//
+// Unlike chess::Move it has no move type. Castling is "king takes own rook" and en passant is the plain diagonal
+// pawn move, so the position alone tells them apart, and two codes are equal exactly when the tensors built from
+// them are equal. (chess::Move::operator== also compares the type bits, so a NORMAL e5d6 and an ENPASSANT e5d6
+// differ; that is what made illegal moves collide with legal ones.)
+//
+// A Code is always valid: construction aborts on a square outside 0..63 or a promotion outside 0..4.
+// Written to the dataset as 16 bits: to (bits 0-5) | from (6-11) | promotion (12-14). There are
+// 5 * 64 * 64 = 20480 different values and the value is a dense index into [0, COUNT).
 // ---------------------------------------------------------------------------------------------
-using Code                 = std::uint16_t;
-constexpr Code RESIGN_CODE = 65;
+constexpr int NO_PROMOTION     = 0;
+constexpr int KNIGHT_PROMOTION = 1;
+constexpr int BISHOP_PROMOTION = 2;
+constexpr int ROOK_PROMOTION   = 3;
+constexpr int QUEEN_PROMOTION  = 4;
 
-inline Code make_code(int from, int to, int promo = 0) {
-    return static_cast<Code>(to | (from << 6) | (promo << 12));
-}
-inline int code_from(Code c) {
-    return (c >> 6) & 63;
-}
-inline int code_to(Code c) {
-    return c & 63;
-}
-inline int code_promo(Code c) {
-    return (c >> 12) & 7;
-}
+class Code {
+   public:
+    static constexpr int NUM_SQUARES     = 64;
+    static constexpr int NUM_PROMOTIONS  = 5;  // none, knight, bishop, rook, queen
+    static constexpr std::uint32_t COUNT = NUM_PROMOTIONS * NUM_SQUARES * NUM_SQUARES;
 
-inline Code encode(const chess::Move m) {
-    int promo = 0;
-    if (m.typeOf() == chess::Move::PROMOTION) {
-        promo = 1 + static_cast<int>(m.promotionType()) - static_cast<int>(chess::PieceType::KNIGHT);
+    // a1a1, a placeholder for arrays: a real move never has from == to except resign (b1b1)
+    constexpr Code() = default;
+    constexpr Code(int from, int to, int promo = NO_PROMOTION) : raw_(pack(from, to, promo)) {}
+
+    static Code of(const chess::Move m) {
+        int promo = NO_PROMOTION;
+        if (m.typeOf() == chess::Move::PROMOTION) {
+            promo = KNIGHT_PROMOTION + static_cast<int>(m.promotionType()) - static_cast<int>(chess::PieceType::KNIGHT);
+        }
+        return Code(m.from().index(), m.to().index(), promo);
     }
-    return make_code(m.from().index(), m.to().index(), promo);
-}
+
+    // For data that was not produced by this program: nullopt unless the value is a valid code.
+    static std::optional<Code> from_raw(const std::uint16_t raw) {
+        if (raw >= COUNT) {
+            return std::nullopt;
+        }
+        Code code;
+        code.raw_ = raw;
+        return code;
+    }
+
+    // b1b1: the null move, "resign". It is never a legal ordinary move and never used as an illegal one.
+    static constexpr Code resign() { return Code(1, 1); }
+
+    constexpr int from() const { return (raw_ >> 6) & 63; }
+    constexpr int to() const { return raw_ & 63; }
+    constexpr int promo() const { return raw_ >> 12; }
+    constexpr std::uint16_t raw() const { return raw_; }
+
+    constexpr Code with_promo(const int promo) const { return Code(from(), to(), promo); }
+    constexpr Code without_promo() const { return Code(from(), to()); }
+
+    friend constexpr bool operator==(const Code a, const Code b) { return a.raw_ == b.raw_; }
+    friend constexpr bool operator!=(const Code a, const Code b) { return a.raw_ != b.raw_; }
+    friend constexpr bool operator<(const Code a, const Code b) { return a.raw_ < b.raw_; }
+
+   private:
+    static constexpr std::uint16_t pack(const int from, const int to, const int promo) {
+        if (from < 0 || from >= NUM_SQUARES || to < 0 || to >= NUM_SQUARES || promo < 0 || promo >= NUM_PROMOTIONS) {
+            invalid(from, to, promo);
+        }
+        return static_cast<std::uint16_t>(to | (from << 6) | (promo << 12));
+    }
+
+    [[noreturn]] static void invalid(const int from, const int to, const int promo) {
+        std::cerr << "invalid move code: from " << from << ", to " << to << ", promotion " << promo << "\n";
+        std::abort();
+    }
+
+    std::uint16_t raw_ = 0;
+};
 
 // ---------------------------------------------------------------------------------------------
 // Buckets
@@ -158,45 +208,65 @@ struct Example {
     std::uint8_t white_to_move;   // 1 / 0
     std::uint8_t legal_kind;      // nw::Kind
     std::uint8_t illegal_reason;  // nw::Reason
+
+    Code legal() const { return Code::from_raw(legal_move).value(); }
+    Code illegal() const { return Code::from_raw(illegal_move).value(); }
 };
 static_assert(sizeof(Example) == 80, "Example must be 80 bytes");
 
 // ---------------------------------------------------------------------------------------------
-// Fast membership set for move codes, O(1) insert/lookup and O(size) clear.
+// The pseudo-legal moves of one position. A queen has at most 27 targets and a pawn on its seventh rank at most 12
+// (three targets, four promotions), so the positions the generator builds, which have at most 36 pieces,
+// stay far below the capacity. add() aborts instead of overflowing.
+// ---------------------------------------------------------------------------------------------
+struct MoveBuf {
+    static constexpr int CAPACITY = 1024;
+
+    std::array<chess::Move, CAPACITY> m;
+    int n = 0;
+
+    void clear() { n = 0; }
+    void add(const chess::Move mv) {
+        if (n == CAPACITY) {
+            std::cerr << "internal error: more than " << CAPACITY << " pseudo-legal moves\n";
+            std::abort();
+        }
+        m[n++] = mv;
+    }
+    const chess::Move* begin() const { return m.data(); }
+    const chess::Move* end() const { return m.data() + n; }
+    int size() const { return n; }
+};
+
+// ---------------------------------------------------------------------------------------------
+// Fast membership set for move codes, O(1) insert / lookup and O(size) clear.
 // ---------------------------------------------------------------------------------------------
 class CodeSet {
    public:
-    CodeSet() { items_.reserve(512); }
-    void insert(Code c) {
-        std::uint64_t& w      = bits_[c >> 6];
-        const std::uint64_t m = 1ull << (c & 63);
-        if (!(w & m)) {
-            w |= m;
+    CodeSet() { items_.reserve(MoveBuf::CAPACITY); }
+
+    void insert(const Code c) {
+        std::uint64_t& word   = bits_[c.raw() >> 6];
+        const std::uint64_t m = 1ull << (c.raw() & 63);
+        if (!(word & m)) {
+            word |= m;
             items_.push_back(c);
         }
     }
-    bool contains(Code c) const { return (bits_[c >> 6] >> (c & 63)) & 1; }
+    bool contains(const Code c) const { return (bits_[c.raw() >> 6] >> (c.raw() & 63)) & 1; }
     void clear() {
         for (const Code c : items_) {
-            bits_[c >> 6] = 0;
+            bits_[c.raw() >> 6] = 0;
         }
         items_.clear();
     }
     std::size_t size() const { return items_.size(); }
 
    private:
-    std::array<std::uint64_t, 512> bits_{};  // 32768 codes
-    std::vector<Code> items_;
-};
+    static constexpr std::size_t WORDS = (Code::COUNT + 63) / 64;  // one bit per possible code: 320 words
 
-struct MoveBuf {
-    std::array<chess::Move, 1024> m;
-    int n = 0;
-    void clear() { n = 0; }
-    void add(const chess::Move mv) { m[n++] = mv; }
-    const chess::Move* begin() const { return m.data(); }
-    const chess::Move* end() const { return m.data() + n; }
-    int size() const { return n; }
+    std::array<std::uint64_t, WORDS> bits_{};
+    std::vector<Code> items_;
 };
 
 // Pseudo-legal moves: each piece follows its movement rules and may not land on its own piece, but
@@ -378,7 +448,7 @@ struct Analysis {
         chess::movegen::legalmoves(legal, b);
         no_moves = legal.empty();
         for (const chess::Move m : legal) {
-            legal_set.insert(encode(m));
+            legal_set.insert(Code::of(m));
             by_kind[kind_of(b, m)].push_back(m);
         }
         in_check = b.inCheck();
@@ -417,16 +487,13 @@ inline bool is_slider(chess::PieceType pt) {
 // Explains why `c` is not a legal move in the position. Returns R_LEGAL if it is legal (or the resign code).
 inline Reason classify(const chess::Board& b, const Analysis& a, const Code c) {
     using namespace chess;
-    if (c == RESIGN_CODE || a.legal_set.contains(c)) {
+    if (c == Code::resign() || a.legal_set.contains(c)) {
         return R_LEGAL;
     }
 
-    const int from  = code_from(c);
-    const int to    = code_to(c);
-    const int promo = code_promo(c);
-    if (promo > 4) {
-        return PROMOTION_RULE;
-    }
+    const int from  = c.from();
+    const int to    = c.to();
+    const int promo = c.promo();
     if (from == to) {
         return SAME_SQUARE;
     }
@@ -447,16 +514,16 @@ inline Reason classify(const chess::Board& b, const Analysis& a, const Code c) {
     const bool to_last  = (to >> 3) == last_rank;
     Code lookup         = c;
 
-    if (promo != 0) {
+    if (promo != NO_PROMOTION) {
         if (!is_pawn || !to_last) {
             return PROMOTION_RULE;
         }
     } else if (is_pawn && to_last) {
         // Pawn reaches the last rank without saying what it becomes.
-        if (a.pseudo_set.contains(static_cast<Code>(c | (4 << 12)))) {
+        if (a.pseudo_set.contains(c.with_promo(QUEEN_PROMOTION))) {
             return PROMOTION_RULE;
         }
-        lookup = static_cast<Code>(c | (4 << 12));
+        lookup = c.with_promo(QUEEN_PROMOTION);
     }
 
     const Piece tp      = b.at<Piece>(Square(to));
@@ -510,11 +577,11 @@ inline Reason classify(const chess::Board& b, const Analysis& a, const Code c) {
 inline void Analysis::analyze_pseudo(const chess::Board& b) {
     generate_pseudolegal(b, pseudo);
     for (const chess::Move m : pseudo) {
-        pseudo_set.insert(encode(m));
+        pseudo_set.insert(Code::of(m));
     }
     pseudo_done = true;
     for (const chess::Move m : pseudo) {
-        const Code c = encode(m);
+        const Code c = Code::of(m);
         if (legal_set.contains(c)) {
             continue;
         }
