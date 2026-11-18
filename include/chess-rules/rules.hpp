@@ -3,7 +3,6 @@
 // per-position analysis and the classifier that explains *why* a move is illegal.
 // Works for standard chess and Chess960 (castling is "king takes own rook").
 
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -330,8 +329,12 @@ inline Kind kind_of(const chess::Board& b, const chess::Move m) {
 }
 
 // chess-library counts a check by two diagonal sliders (bishop / queen) as a single check, and likewise two
-// knights or two pawns, so in those positions it also returns moves that leave the king in check. Such positions
-// are skipped (they are rare, but real: a queen can discover a diagonal attack by moving onto the other diagonal).
+// knights or two pawns, so in those positions it also returns moves that leave the king in check.
+//
+// Such positions cannot arise in legal play: the last move must create every check, so one of the two checkers
+// would have to be discovered by the moved piece, and a bishop / queen that uncovers a diagonal line must have
+// attacked the king along it before moving, which is illegal (knights and pawns cannot be discovered at all).
+// The guard therefore never fires for random play; it only rejects unreachable boards from the position builders.
 inline bool library_handles_checks(const chess::Board& b) {
     const chess::Color us     = b.sideToMove();
     const chess::Color them   = ~us;
@@ -359,7 +362,7 @@ struct Analysis {
     bool in_check    = false;
     bool no_moves    = false;  // checkmate or stalemate
     bool pseudo_done = false;
-    bool trusted     = true;  // false if the library's legal move generation is known to be wrong here
+    bool trusted     = true;  // false if this is an impossible double check position the library "mishandles".
 
     void analyze_legal(const chess::Board& b) {
         legal_set.clear();
