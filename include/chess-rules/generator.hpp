@@ -535,10 +535,10 @@ class Shard {
                               << reason_name(classify(b, an_, *c)) << "\n";
                     std::abort();
                 }
-                Code legal = RESIGN_CODE;
+                Code legal = Code::resign();
                 if (kind != RESIGN) {
                     const auto& moves = an_.by_kind[kind];
-                    legal             = encode(moves[rng_.below(static_cast<std::uint32_t>(moves.size()))]);
+                    legal             = Code::of(moves[rng_.below(static_cast<std::uint32_t>(moves.size()))]);
                 }
                 out.push_back(make_example(b, ep_file, legal, *c, kind, reason));
                 ++stats_.kind[kind];
@@ -576,8 +576,8 @@ class Shard {
             }
         }
         e.bitboards[8]   = rooks;
-        e.legal_move     = legal;
-        e.illegal_move   = illegal;
+        e.legal_move     = legal.raw();
+        e.illegal_move   = illegal.raw();
         e.ep_file        = ep_file < 0 ? 255 : static_cast<std::uint8_t>(ep_file);
         e.white_to_move  = b.sideToMove() == Color::WHITE;
         e.legal_kind     = static_cast<std::uint8_t>(kind);
@@ -625,14 +625,14 @@ class Shard {
                 if (s >= 1) {
                     ++s;  // never b1: b1->b1 is the resign code
                 }
-                return accept(make_code(s, s));
+                return accept(Code(s, s));
             }
             case EMPTY_FROM: {
                 const std::uint64_t empty = ~occ;
                 for (int t = 0; t < TRIES; ++t) {
                     const int from = pick_bit(empty, rng_);
                     const int to   = rng_.chance(0.5) ? other_square(from) : near_square(from, 3);
-                    if (const auto c = accept(make_code(from, to))) {
+                    if (const auto c = accept(Code(from, to))) {
                         return c;
                     }
                 }
@@ -652,7 +652,7 @@ class Shard {
                             to = pick_bit(pat, rng_);
                         }
                     }
-                    if (const auto c = accept(make_code(from, to))) {
+                    if (const auto c = accept(Code(from, to))) {
                         return c;
                     }
                 }
@@ -666,7 +666,7 @@ class Shard {
                     if (!pat) {
                         continue;
                     }
-                    if (const auto c = accept(make_code(from, pick_bit(pat, rng_)))) {
+                    if (const auto c = accept(Code(from, pick_bit(pat, rng_)))) {
                         return c;
                     }
                 }
@@ -676,7 +676,7 @@ class Shard {
                 for (int t = 0; t < TRIES; ++t) {
                     const int from = pick_bit(own, rng_);
                     const int to   = rng_.chance(0.5) ? other_square(from) : near_square(from, 2);
-                    if (const auto c = accept(make_code(from, to))) {
+                    if (const auto c = accept(Code(from, to))) {
                         return c;
                     }
                 }
@@ -703,7 +703,7 @@ class Shard {
                     return std::nullopt;
                 }
                 const auto& [from, targets] = cand[rng_.below(n)];
-                return accept(make_code(from, pick_bit(targets, rng_)));
+                return accept(Code(from, pick_bit(targets, rng_)));
             }
             case PAWN_BLOCKED: {
                 std::array<Code, 64> cand;
@@ -715,8 +715,10 @@ class Shard {
                     const int f1 = from + dir, f2 = f1 + dir;
                     const bool o1 = (occ >> f1) & 1;
                     auto add      = [&](int to) {
-                        const int promo = ((to >> 3) == last_rank && rng_.chance(0.5)) ? rng_.range(1, 4) : 0;
-                        cand[n++]       = make_code(from, to, promo);
+                        const int promo = ((to >> 3) == last_rank && rng_.chance(0.5))
+                                              ? rng_.range(KNIGHT_PROMOTION, QUEEN_PROMOTION)
+                                              : NO_PROMOTION;
+                        cand[n++]       = Code(from, to, promo);
                     };
                     if (o1) {
                         add(f1);
@@ -738,7 +740,7 @@ class Shard {
                 for (int t = 0; t < TRIES; ++t) {
                     const int from = pick_bit(pawns, rng_);
                     const int to   = near_square(from, 2);
-                    if (const auto c = accept(make_code(from, to))) {
+                    if (const auto c = accept(Code(from, to))) {
                         return c;
                     }
                 }
@@ -750,17 +752,17 @@ class Shard {
                     const auto& promos = an_.by_kind[PAWN_PROMOTION];
                     if (rng_.chance(0.4) && !promos.empty()) {
                         // A legal promotion without saying what the pawn becomes.
-                        c = static_cast<Code>(encode(promos[rng_.below(static_cast<std::uint32_t>(promos.size()))]) &
-                                              0x0FFF);
+                        c = Code::of(promos[rng_.below(static_cast<std::uint32_t>(promos.size()))]).without_promo();
                     } else {
                         if (an_.pseudo.size() == 0) {
                             return std::nullopt;
                         }
-                        c = encode(an_.pseudo.m[rng_.below(static_cast<std::uint32_t>(an_.pseudo.size()))]);
-                        if (code_promo(c) != 0) {
-                            c = static_cast<Code>(c & 0x0FFF);
+                        c = Code::of(an_.pseudo.m[rng_.below(static_cast<std::uint32_t>(an_.pseudo.size()))]);
+                        if (c.promo() != NO_PROMOTION) {
+                            c = c.without_promo();
                         } else {
-                            c = static_cast<Code>(c | (rng_.range(1, 4) << 12));  // a promotion piece nobody asked for
+                            // a promotion piece nobody asked for
+                            c = c.with_promo(rng_.range(KNIGHT_PROMOTION, QUEEN_PROMOTION));
                         }
                     }
                     if (const auto a = accept(c)) {
@@ -776,7 +778,7 @@ class Shard {
                 }
                 const int king = b.kingSq(us).index();
                 for (int t = 0; t < 8; ++t) {
-                    if (const auto c = accept(make_code(king, pick_bit(rooks, rng_)))) {
+                    if (const auto c = accept(Code(king, pick_bit(rooks, rng_)))) {
                         return c;
                     }
                 }
@@ -1178,11 +1180,11 @@ class Shard {
         if (!load(g, white_push)) {
             return false;
         }
-        const Code push = make_code(start * 8 + f, dest * 8 + f);
+        const Code push = Code(start * 8 + f, dest * 8 + f);
         chess::Movelist legal;
         chess::movegen::legalmoves(legal, scratch_);
         for (const chess::Move m : legal) {
-            if (encode(m) == push) {
+            if (Code::of(m) == push) {
                 scratch_.makeMove(m);  // the library records the en passant square: an enemy pawn is adjacent
                 ep_file_ = f;
                 return true;

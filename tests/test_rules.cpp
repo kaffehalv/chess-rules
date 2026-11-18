@@ -19,11 +19,11 @@ struct Position {
     }
 
     nw::Reason classify(const char* from, const char* to, int promo = 0) const {
-        return nw::classify(board, analysis, nw::make_code(sq(from), sq(to), promo));
+        return nw::classify(board, analysis, nw::Code(sq(from), sq(to), promo));
     }
 
     bool is_legal(const char* from, const char* to, int promo = 0) const {
-        return analysis.legal_set.contains(nw::make_code(sq(from), sq(to), promo));
+        return analysis.legal_set.contains(nw::Code(sq(from), sq(to), promo));
     }
 
     chess::Board board;
@@ -36,14 +36,82 @@ constexpr int QUEEN_PROMO  = 4;
 
 }  // namespace
 
-TEST_CASE("move codes", "[rules]") {
-    REQUIRE(sizeof(nw::Example) == 80);
-    REQUIRE(nw::make_code(1, 1) == nw::RESIGN_CODE);
+TEST_CASE("a Code keeps from, to and promotion apart", "[rules][code]") {
+    const nw::Code code(sq("e7"), sq("e8"), nw::QUEEN_PROMOTION);
+    REQUIRE(code.from() == sq("e7"));
+    REQUIRE(code.to() == sq("e8"));
+    REQUIRE(code.promo() == nw::QUEEN_PROMOTION);
 
-    const nw::Code code = nw::make_code(sq("e7"), sq("e8"), QUEEN_PROMO);
-    REQUIRE(nw::code_from(code) == sq("e7"));
-    REQUIRE(nw::code_to(code) == sq("e8"));
-    REQUIRE(nw::code_promo(code) == QUEEN_PROMO);
+    SECTION("a promotion can be added and removed") {
+        REQUIRE(code.without_promo() == nw::Code(sq("e7"), sq("e8")));
+        REQUIRE(code.without_promo().with_promo(nw::QUEEN_PROMOTION) == code);
+        REQUIRE(code.with_promo(nw::KNIGHT_PROMOTION) != code);
+    }
+
+    SECTION("the raw value has the documented layout") {
+        REQUIRE(code.raw() == (sq("e8") | sq("e7") << 6 | nw::QUEEN_PROMOTION << 12));
+    }
+
+    SECTION("resign is b1b1") {
+        static_assert(nw::Code::resign() == nw::Code(1, 1));
+        REQUIRE(nw::Code::resign() == nw::Code(sq("b1"), sq("b1")));
+        REQUIRE(nw::Code::resign().raw() == 65);
+    }
+
+    SECTION("the raw values are a dense index and the codes are ordered") {
+        REQUIRE(nw::Code(0, 0).raw() == 0);
+        REQUIRE(nw::Code(63, 63, nw::QUEEN_PROMOTION).raw() == nw::Code::COUNT - 1);
+        REQUIRE(nw::Code(0, 1) < nw::Code(0, 2));
+    }
+}
+
+TEST_CASE("only valid values become codes", "[rules][code]") {
+    REQUIRE(nw::Code::from_raw(0).has_value());
+    REQUIRE(nw::Code::from_raw(nw::Code::COUNT - 1).has_value());
+    REQUIRE(nw::Code::from_raw(65).value() == nw::Code::resign());
+
+    REQUIRE_FALSE(nw::Code::from_raw(nw::Code::COUNT).has_value());
+    REQUIRE_FALSE(nw::Code::from_raw(5 << 12).has_value());  // a promotion piece that does not exist
+    REQUIRE_FALSE(nw::Code::from_raw(0xFFFF).has_value());
+}
+
+TEST_CASE("a Code does not depend on the type of the library move", "[rules][code]") {
+    const auto e5 = chess::Square("e5");
+    const auto d6 = chess::Square("d6");
+    const auto e1 = chess::Square("e1");
+    const auto h1 = chess::Square("h1");
+
+    SECTION("en passant and the plain move between the same squares") {
+        const auto plain      = chess::Move::make<chess::Move::NORMAL>(e5, d6);
+        const auto en_passant = chess::Move::make<chess::Move::ENPASSANT>(e5, d6);
+        REQUIRE(plain != en_passant);  // what made illegal moves collide with legal ones
+        REQUIRE(nw::Code::of(plain) == nw::Code::of(en_passant));
+    }
+
+    SECTION("castling and king takes own rook") {
+        const auto plain    = chess::Move::make<chess::Move::NORMAL>(e1, h1);
+        const auto castling = chess::Move::make<chess::Move::CASTLING>(e1, h1);
+        REQUIRE(plain != castling);
+        REQUIRE(nw::Code::of(plain) == nw::Code::of(castling));
+    }
+
+    SECTION("the promotion piece is kept") {
+        const auto a7 = chess::Square("a7");
+        const auto a8 = chess::Square("a8");
+        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::KNIGHT)).promo() ==
+                nw::KNIGHT_PROMOTION);
+        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::BISHOP)).promo() ==
+                nw::BISHOP_PROMOTION);
+        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::ROOK)).promo() ==
+                nw::ROOK_PROMOTION);
+        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::QUEEN)).promo() ==
+                nw::QUEEN_PROMOTION);
+        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::NORMAL>(a7, a8)).promo() == nw::NO_PROMOTION);
+    }
+}
+
+TEST_CASE("the record has the documented size", "[rules][code]") {
+    REQUIRE(sizeof(nw::Example) == 80);
 }
 
 TEST_CASE("library moves are encoded the way the dataset describes", "[rules]") {
@@ -92,19 +160,23 @@ TEST_CASE("the random number generator is reproducible and in range", "[rules]")
 }
 
 TEST_CASE("CodeSet inserts, finds and clears in constant time", "[rules]") {
-    nw::CodeSet set;
-    REQUIRE_FALSE(set.contains(123));
+    const nw::Code first(sq("e2"), sq("e4"));
+    const nw::Code last(63, 63, nw::QUEEN_PROMOTION);  // the largest possible code
 
-    set.insert(123);
-    set.insert(123);
-    set.insert(32767);
-    REQUIRE(set.contains(123));
-    REQUIRE(set.contains(32767));
+    nw::CodeSet set;
+    REQUIRE_FALSE(set.contains(first));
+
+    set.insert(first);
+    set.insert(first);
+    set.insert(last);
+    REQUIRE(set.contains(first));
+    REQUIRE(set.contains(last));
+    REQUIRE_FALSE(set.contains(nw::Code(sq("e2"), sq("e3"))));
     REQUIRE(set.size() == 2);
 
     set.clear();
-    REQUIRE_FALSE(set.contains(123));
-    REQUIRE_FALSE(set.contains(32767));
+    REQUIRE_FALSE(set.contains(first));
+    REQUIRE_FALSE(set.contains(last));
     REQUIRE(set.size() == 0);
 }
 
@@ -202,7 +274,7 @@ TEST_CASE("every illegal reason is recognised", "[rules]") {
         chess::Movelist moves;
         chess::movegen::legalmoves(moves, board);
         for (const chess::Move move : moves) {
-            if (nw::encode(move) == nw::make_code(sq("e7"), sq("e5"))) {
+            if (nw::Code::of(move) == nw::Code(sq("e7"), sq("e5"))) {
                 board.makeMove(move);
                 break;
             }
@@ -211,7 +283,7 @@ TEST_CASE("every illegal reason is recognised", "[rules]") {
         analysis.analyze_legal(board);
         analysis.analyze_pseudo(board);
 
-        const nw::Code ep = nw::make_code(sq("d5"), sq("e6"));
+        const nw::Code ep(sq("d5"), sq("e6"));
         REQUIRE_FALSE(analysis.legal_set.contains(ep));
         REQUIRE(analysis.pseudo_set.contains(ep));
         REQUIRE(nw::classify(board, analysis, ep) == nw::KS_EP);
@@ -222,7 +294,7 @@ TEST_CASE("legal moves and the resign code are never illegal", "[rules]") {
     const Position position(chess::constants::STARTPOS);
     REQUIRE(position.classify("e2", "e4") == nw::R_LEGAL);
     REQUIRE(position.classify("b1", "c3") == nw::R_LEGAL);
-    REQUIRE(nw::classify(position.board, position.analysis, nw::RESIGN_CODE) == nw::R_LEGAL);
+    REQUIRE(nw::classify(position.board, position.analysis, nw::Code::resign()) == nw::R_LEGAL);
 }
 
 TEST_CASE("legal move kinds", "[rules]") {
@@ -259,9 +331,9 @@ TEST_CASE("the classifier agrees with the library on every possible move code", 
             for (int from = 0; from < 64; ++from) {
                 for (int to = 0; to < 64; ++to) {
                     for (int promo = 0; promo <= 4; ++promo) {
-                        const nw::Code code     = nw::make_code(from, to, promo);
+                        const nw::Code code(from, to, promo);
                         const nw::Reason reason = nw::classify(board, analysis, code);
-                        const bool legal        = analysis.legal_set.contains(code) || code == nw::RESIGN_CODE;
+                        const bool legal        = analysis.legal_set.contains(code) || code == nw::Code::resign();
                         const bool pseudo_illegal =
                             analysis.pseudo_set.contains(code) && !analysis.legal_set.contains(code);
 
@@ -298,7 +370,7 @@ TEST_CASE("every legal move is also pseudo-legal", "[rules][slow]") {
             analysis.analyze_legal(board);
             analysis.analyze_pseudo(board);
             for (const chess::Move move : analysis.legal) {
-                if (!analysis.pseudo_set.contains(nw::encode(move))) {
+                if (!analysis.pseudo_set.contains(nw::Code::of(move))) {
                     ++missing;
                 }
             }

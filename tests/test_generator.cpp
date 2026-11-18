@@ -92,14 +92,14 @@ TEST_CASE("every record is internally consistent", "[generator]") {
 
     for (const nw::Example& example : examples) {
         REQUIRE(example.legal_move != example.illegal_move);
-        REQUIRE((example.legal_move == nw::RESIGN_CODE) == (example.legal_kind == nw::RESIGN));
-        REQUIRE(example.illegal_move != nw::RESIGN_CODE);
+        REQUIRE((example.legal_move == nw::Code::resign().raw()) == (example.legal_kind == nw::RESIGN));
+        REQUIRE(example.illegal_move != nw::Code::resign().raw());
         REQUIRE(example.legal_kind < nw::NUM_KINDS);
         REQUIRE(example.illegal_reason < nw::NUM_REASONS);
         REQUIRE(example.white_to_move <= 1);
         REQUIRE((example.ep_file < 8 || example.ep_file == 255));
-        REQUIRE(nw::code_promo(example.legal_move) <= 4);
-        REQUIRE(nw::code_promo(example.illegal_move) <= 4);
+        REQUIRE(nw::Code::from_raw(example.legal_move).has_value());
+        REQUIRE(nw::Code::from_raw(example.illegal_move).has_value());
 
         const std::uint64_t white = example.bitboards[0];
         const std::uint64_t black = example.bitboards[1];
@@ -173,5 +173,5 @@ TEST_CASE("a position without any pseudo-legal move still yields a resign exampl
     REQUIRE(emitted);
     REQUIRE(examples.size() == 1);
     REQUIRE(examples[0].legal_kind == nw::RESIGN);
-    REQUIRE(examples[0].legal_move == nw::RESIGN_CODE);
+    REQUIRE(examples[0].legal() == nw::Code::resign());
 }
