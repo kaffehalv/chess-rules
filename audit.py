@@ -17,6 +17,7 @@ import argparse
 import collections
 import random
 import sys
+from pathlib import Path
 
 import chess
 import numpy as np
@@ -93,6 +94,21 @@ PIECE_KIND = {
     chess.KING: K["king"],
 }
 SLIDERS = (chess.BISHOP, chess.ROOK, chess.QUEEN)
+
+
+def load_records(path):
+    """Memory-map a dataset file: nothing is read until a record is touched.
+
+    A file whose size is not a whole number of records is refused instead of
+    silently dropping the partial record at the end.
+    """
+    size = Path(path).stat().st_size
+    if size == 0 or size % RECORD_BYTES:
+        message = (
+            f"{path}: {size} bytes is not a whole number of {RECORD_BYTES} byte records"
+        )
+        raise SystemExit(message)
+    return np.memmap(path, dtype=DTYPE, mode="r")
 
 
 def build_board(rec):
@@ -419,7 +435,7 @@ def check_leakage(data, other_files):
     """Report positions that also occur in other split files."""
     mine = {position_key(r) for r in data}
     for other in other_files:
-        other_data = np.fromfile(other, dtype=DTYPE)
+        other_data = load_records(other)
         shared = sum(1 for r in other_data if position_key(r) in mine)
         print(f"positions shared with {other}: {shared} of {len(other_data)}")
 
@@ -438,7 +454,7 @@ def main():
     )
     args = parser.parse_args()
 
-    data = np.fromfile(args.file, dtype=DTYPE)
+    data = load_records(args.file)
     print(f"{args.file}: {len(data)} records")
     print_balance(data)
     print_duplicates(data)
