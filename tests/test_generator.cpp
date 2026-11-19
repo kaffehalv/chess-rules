@@ -123,7 +123,7 @@ TEST_CASE("the same seed gives byte-identical output", "[generator]") {
 
 TEST_CASE("the splits never share a position", "[generator]") {
     const std::vector<nw::Example> train = generate(small_config(150, 5, 0));
-    const std::vector<nw::Example> val   = generate(small_config(150, 6, 1));
+    const std::vector<nw::Example> eval  = generate(small_config(150, 6, 1));
     const std::vector<nw::Example> test  = generate(small_config(150, 7, 2));
 
     std::set<BoardKey> train_boards;
@@ -132,7 +132,7 @@ TEST_CASE("the splits never share a position", "[generator]") {
     }
 
     int shared = 0;
-    for (const std::vector<nw::Example>* other : {&val, &test}) {
+    for (const std::vector<nw::Example>* other : {&eval, &test}) {
         for (const nw::Example& example : *other) {
             shared += static_cast<int>(train_boards.count(board_key(example)));
         }

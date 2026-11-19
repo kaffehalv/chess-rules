@@ -8,7 +8,7 @@ For a random sample of records it rebuilds the position, then re-derives
 and reports every disagreement. It also reports bucket balance, duplicates and
 split leakage.
 
-    python3 tools/audit.py train.bin [--sample 200000] [--leak val.bin test.bin]
+    python3 tools/audit.py train.bin [--sample 200000] [--leak eval.bin test.bin]
 """
 
 from __future__ import annotations

@@ -23,13 +23,13 @@
     if (msg) {
         std::cerr << "error: " << msg << "\n\n";
     }
-    std::cerr << "usage: chess-rules --out FILE --samples-per-kind N [options]\n"
-                 "  --split train|val|test     which position split to generate (default train)\n"
+    std::cerr << "usage: chess-rules --split [train|eval|test] --samples-per-kind N [options]\n"
+                 "  --out                          filename (default <split>.bin)\n"
                  "  --variant standard|960|mixed   start positions (default mixed)\n"
-                 "  --threads T                independent shards (default: hardware threads)\n"
-                 "  --seed S                   (default 1)\n"
-                 "  --min-play-share X         minimum share of iterations on plain random play (default 0.25)\n"
-                 "  --no-shuffle               keep generation order\n"
+                 "  --threads T                    independent shards (default: hardware threads)\n"
+                 "  --seed S                       (default [train, eval, test] = [1, 2, 3])\n"
+                 "  --min-play-share X             minimum share of iterations on plain random play (default 0.25)\n"
+                 "  --no-shuffle                   keep generation order\n"
                  "  --verbose\n";
     std::exit(msg ? EXIT_FAILURE : EXIT_SUCCESS);
 }
@@ -38,7 +38,7 @@ struct Args {
     std::filesystem::path out_path;
     std::uint64_t per_kind = 0;
     std::uint64_t seed     = 1;
-    int split              = 0;
+    int split              = -1;
     nw::Variant variant    = nw::Variant::MIXED;
     int threads            = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     bool shuffle           = true;
@@ -48,6 +48,8 @@ struct Args {
 
 Args parse_args(int argc, char** argv) {
     Args args;
+
+    bool user_seed = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -65,13 +67,14 @@ Args parse_args(int argc, char** argv) {
             args.per_kind = std::stoull(next());
         } else if (a == "--seed") {
             args.seed = std::stoull(next());
+            user_seed = true;
         } else if (a == "--threads") {
             args.threads = std::max(1, std::stoi(next()));
         } else if (a == "--split") {
             const std::string v = next();
-            args.split          = v == "train" ? 0 : (v == "val" ? 1 : (v == "test" ? 2 : -1));
+            args.split          = v == "train" ? 0 : (v == "eval" ? 1 : (v == "test" ? 2 : -1));
             if (args.split < 0) {
-                exit_with_message("split must be train, val or test");
+                exit_with_message("split must be train, eval or test");
             }
         } else if (a == "--variant") {
             const std::string v = next();
@@ -93,8 +96,17 @@ Args parse_args(int argc, char** argv) {
         }
     }
 
-    if (args.out_path.empty() || args.per_kind == 0) {
-        exit_with_message("--out and --samples-per-kind are required");
+    if (args.split < 0 || args.per_kind == 0) {
+        exit_with_message("--split and --samples-per-kind are required");
+    }
+
+    if (!user_seed) {
+        args.seed = args.split + 1;
+    }
+
+    if (args.out_path.empty()) {
+        args.out_path = std::filesystem::path(args.split == 0 ? "train" : (args.split == 1 ? "eval" : "test"))
+                            .replace_extension("bin");
     }
 
     args.threads = static_cast<int>(std::min<std::uint64_t>(args.threads, args.per_kind));
@@ -163,7 +175,7 @@ void write_json(const std::filesystem::path& path, const Args& args, const nw::S
     j << "{\n  \"record_bytes\": 80,\n  \"examples\": " << num_examples << ",\n  \"seed\": " << args.seed
       << ",\n  \"split\": \""
       << (args.split == 0   ? "train"
-          : args.split == 1 ? "val"
+          : args.split == 1 ? "eval"
                             : "test")
       << "\",\n  \"variant\": \""
       << (args.variant == nw::Variant::STANDARD   ? "standard"
