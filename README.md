@@ -38,9 +38,9 @@ UBSan using `-DCRULES_SANITIZE=ON`.
 ## Generate
 
 ```shell
-build/chess-rules --out train.bin --samples-per-kind 1000000 --split train --variant mixed --threads 8 --seed 1
-build/chess-rules --out val.bin   --samples-per-kind 100000  --split val   --variant mixed --threads 8 --seed 2
-build/chess-rules --out test.bin  --samples-per-kind 100000  --split test  --variant mixed --threads 8 --seed 3
+build/chess-rules --split train --samples-per-kind 100000
+build/chess-rules --split eval  --samples-per-kind 10000
+build/chess-rules --split test  --samples-per-kind 10000
 ```
 
 ## Audit
@@ -57,7 +57,7 @@ pip install numpy chess
 and run e.g.
 
 ```shell
-python audit.py train.bin --sample 200000 --leak val.bin test.bin
+python audit.py train.bin --sample 200000 --leak eval.bin test.bin
 ```
 
 ## Record layout (80 bytes, little endian)

@@ -52,7 +52,7 @@ inline std::string chess960_fen(const int idx) {
     return black + "/pppppppp/8/8/8/8/PPPPPPPP/" + white + " w KQkq - 0 1";
 }
 
-// Deterministic train / val / test partition of the 960 start positions (768 / 96 / 96).
+// Deterministic train / eval / test partition of the 960 start positions (768 / 96 / 96).
 // Own Fisher-Yates over raw mt19937 output, since std::shuffle and the standard distributions
 // are not guaranteed to give the same result across standard libraries.
 // NOTE: do not split by idx % k: the Scharnagl index encodes the bishop squares in its low digits.
