@@ -25,6 +25,7 @@
     }
     std::cerr << "usage: chess-rules --split [train|eval|test] --samples-per-kind N [options]\n"
                  "  --out                          filename (default <split>.bin)\n"
+                 "  --dir                          directory (not used if --out is set)\n"
                  "  --variant standard|960|mixed   start positions (default mixed)\n"
                  "  --threads T                    independent shards (default: hardware threads)\n"
                  "  --seed S                       (default [train, eval, test] = [1, 2, 3])\n"
@@ -49,6 +50,7 @@ struct Args {
 Args parse_args(int argc, char** argv) {
     Args args;
 
+    std::filesystem::path dir;
     bool user_seed = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -63,6 +65,8 @@ Args parse_args(int argc, char** argv) {
 
         if (a == "--out") {
             args.out_path = next();
+        } else if (a == "--dir") {
+            dir = next();
         } else if (a == "--samples-per-kind") {
             args.per_kind = std::stoull(next());
         } else if (a == "--seed") {
@@ -105,8 +109,11 @@ Args parse_args(int argc, char** argv) {
     }
 
     if (args.out_path.empty()) {
-        args.out_path = std::filesystem::path(args.split == 0 ? "train" : (args.split == 1 ? "eval" : "test"))
-                            .replace_extension("bin");
+        if (!dir.empty()) {
+            std::filesystem::create_directories(dir);
+        }
+        args.out_path = dir / std::filesystem::path(args.split == 0 ? "train" : (args.split == 1 ? "eval" : "test"))
+                                  .replace_extension("bin");
     }
 
     args.threads = static_cast<int>(std::min<std::uint64_t>(args.threads, args.per_kind));
