@@ -16,7 +16,7 @@
 #include "chess-rules/chess960.hpp"
 #include "chess-rules/rules.hpp"
 
-namespace nw {
+namespace cr {
 
 enum class Variant { STANDARD, CHESS960, MIXED };
 
@@ -1266,4 +1266,4 @@ class Shard {
     double terminal_defender_p = 0.45;
 };
 
-}  // namespace nw
+}  // namespace cr
