@@ -289,7 +289,7 @@ def test_unpack_places_every_field_on_the_right_feature():
     assert hot(batch.legal[0, cr.MOVE_FROM_FILE]) == [4]
     assert hot(batch.legal[0, cr.MOVE_TO_RANK]) == [3]  # e4
     assert hot(batch.legal[0, cr.MOVE_TO_FILE]) == [4]
-    assert hot(batch.illegal[0, cr.MOVE_PROMOTION]) == [4]  # a7a8 = queen
+    assert hot(batch.illegal[0, cr.MOVE_PROMOTION]) == [3]  # a7a8 = queen, entry 3
     assert batch.legal_code.tolist() == [code(12, 28)]
     assert batch.illegal_code.tolist() == [code(48, 56, 4)]
     assert batch.legal_kind.tolist() == [cr.KINDS.index("pawn_double")]
@@ -303,8 +303,20 @@ def test_unpack_places_every_field_on_the_right_feature():
 def test_unpack_without_en_passant_and_black_to_move():
     batch = cr.unpack(make_record(wtm=0))
 
-    assert batch.board[0, cr.BOARD_EN_PASSANT].sum() == 0
+    assert hot(batch.board[0, cr.BOARD_EN_PASSANT]) == [cr.BOARD_SIZE]  # the none entry
+    assert cr.BOARD_EN_PASSANT.start + cr.BOARD_SIZE == cr.BOARD_EN_PASSANT_NONE
     assert batch.board[0, cr.BOARD_WHITE_TO_MOVE] == 0
+
+
+def test_the_en_passant_group_is_always_one_hot():
+    raw = torch.cat(
+        [make_record(ep=file) for file in range(cr.BOARD_SIZE)]
+        + [make_record(ep=cr.NO_EP)]
+    )
+    group = cr.unpack(raw).board[:, cr.BOARD_EN_PASSANT]
+
+    assert group.shape == (cr.BOARD_SIZE + 1, cr.BOARD_SIZE + 1)
+    assert torch.equal(group, torch.eye(cr.BOARD_SIZE + 1))  # files a-h, then none
 
 
 def test_unpack_converts_to_the_requested_dtype():
@@ -328,13 +340,15 @@ def test_move_vectors_have_the_documented_layout():
 
     assert vectors.shape == (4, cr.MOVE_FEATURES)
     assert cr.MOVE_FEATURES == 8 + 8 + 8 + 8 + 5 + 1
+    assert cr.MOVE_PROMOTION.start + 4 == cr.MOVE_PROMOTION_NONE
+    assert cr.MOVE_RESIGN == cr.MOVE_FEATURES - 1
 
     e2e4 = vectors[0]
     assert hot(e2e4[cr.MOVE_TO_RANK]) == [3]
     assert hot(e2e4[cr.MOVE_TO_FILE]) == [4]
     assert hot(e2e4[cr.MOVE_FROM_RANK]) == [1]
     assert hot(e2e4[cr.MOVE_FROM_FILE]) == [4]
-    assert hot(e2e4[cr.MOVE_PROMOTION]) == [0]  # none
+    assert hot(e2e4[cr.MOVE_PROMOTION]) == [4]  # none is the last entry
     assert e2e4[cr.MOVE_RESIGN] == 0
 
     rook_promotion = vectors[1]  # a7a8r
@@ -342,16 +356,16 @@ def test_move_vectors_have_the_documented_layout():
     assert hot(rook_promotion[cr.MOVE_FROM_FILE]) == [0]
     assert hot(rook_promotion[cr.MOVE_TO_RANK]) == [7]
     assert hot(rook_promotion[cr.MOVE_TO_FILE]) == [0]
-    assert hot(rook_promotion[cr.MOVE_PROMOTION]) == [3]
+    assert hot(rook_promotion[cr.MOVE_PROMOTION]) == [2]  # knight, bishop, rook
 
     resign = vectors[2]  # no squares, promotion none, resign flag
-    assert hot(resign) == [cr.MOVE_PROMOTION.start, cr.MOVE_RESIGN]
+    assert hot(resign) == [cr.MOVE_PROMOTION_NONE, cr.MOVE_RESIGN]
 
     # b1b1 with a promotion piece is an ordinary (illegal) move, not resign
     odd = vectors[3]
     assert hot(odd[cr.MOVE_TO_RANK]) == [0]
     assert hot(odd[cr.MOVE_TO_FILE]) == [1]
-    assert hot(odd[cr.MOVE_PROMOTION]) == [4]
+    assert hot(odd[cr.MOVE_PROMOTION]) == [3]  # queen
     assert odd[cr.MOVE_RESIGN] == 0
 
     assert vectors.sum(dim=1).tolist() == [5, 5, 2, 5]
@@ -359,7 +373,7 @@ def test_move_vectors_have_the_documented_layout():
 
 AUGMENTATION_RECORDS = 2000
 BEFORE_FLAG = slice(0, cr.MOVE_RESIGN)
-SQUARES_AND_PROMOTION = slice(cr.MOVE_TO_RANK.start, cr.MOVE_PROMOTION.start)
+SQUARES = slice(cr.MOVE_TO_RANK.start, cr.MOVE_PROMOTION.start)
 
 
 def assert_only_the_flag_changed(batch, plain, side, mask):
@@ -394,8 +408,7 @@ def test_a_legal_move_can_be_turned_into_resign(tmp_path):
     assert not batch.illegal_augmented.any()
     assert_only_the_flag_changed(batch, plain, "legal", batch.legal_augmented)
     assert torch.all(
-        batch.legal[batch.legal_augmented][:, SQUARES_AND_PROMOTION].sum(dim=1)
-        == len(SQUARE_GROUPS)
+        batch.legal[batch.legal_augmented][:, SQUARES].sum(dim=1) == len(SQUARE_GROUPS)
     )
     assert torch.equal(batch.legal_kind, plain.legal_kind)
     assert torch.equal(batch.illegal, plain.illegal)  # the illegal move is untouched
@@ -414,7 +427,7 @@ def test_an_illegal_move_can_be_turned_into_a_legal_resign(tmp_path):
     assert batch.illegal_augmented.all()
     assert not batch.legal_augmented.any()
     assert_only_the_flag_changed(batch, plain, "illegal", batch.illegal_augmented)
-    squares = batch.illegal[:, SQUARES_AND_PROMOTION]
+    squares = batch.illegal[:, SQUARES]
     assert torch.all(squares.sum(dim=1) == len(SQUARE_GROUPS))  # the squares are kept
     assert torch.equal(batch.illegal_reason, plain.illegal_reason)
     assert torch.equal(batch.legal, plain.legal)
@@ -520,8 +533,10 @@ def expected_board(board, ep_file):
     for index, bitboard in enumerate(bitboards):
         for square in chess.SquareSet(bitboard):
             vector[cr.NUM_SQUARES * index + square] = 1
-    if ep_file != cr.NO_EP:
-        vector[cr.BOARD_EN_PASSANT.start + ep_file] = 1
+    ep_entry = (
+        cr.BOARD_SIZE if ep_file == cr.NO_EP else ep_file
+    )  # the last entry is "none"
+    vector[cr.BOARD_EN_PASSANT.start + ep_entry] = 1
     vector[cr.BOARD_WHITE_TO_MOVE] = float(board.turn == chess.WHITE)
     return vector
 
@@ -530,7 +545,7 @@ def expected_move(move_code):
     """Compute the move vector of a code with plain arithmetic."""
     vector = np.zeros(cr.MOVE_FEATURES, dtype=np.float32)
     if move_code == cr.RESIGN_CODE:
-        vector[cr.MOVE_PROMOTION.start] = 1
+        vector[cr.MOVE_PROMOTION_NONE] = 1
         vector[cr.MOVE_RESIGN] = 1
         return vector
     origin, to, promo = move_code >> 6 & 63, move_code & 63, move_code >> 12
@@ -538,7 +553,8 @@ def expected_move(move_code):
     vector[cr.MOVE_TO_FILE.start + to % 8] = 1
     vector[cr.MOVE_FROM_RANK.start + origin // 8] = 1
     vector[cr.MOVE_FROM_FILE.start + origin % 8] = 1
-    vector[cr.MOVE_PROMOTION.start + promo] = 1
+    # codes have 0 = none, 1-4 = knight .. queen; vectors have knight .. queen, none
+    vector[cr.MOVE_PROMOTION.start + (promo - 1) % cr.NUM_PROMOTIONS] = 1
     return vector
 
 
@@ -563,6 +579,18 @@ def test_unpack_agrees_with_python_chess_on_real_records(real_dataset):
         ), i
         assert batch.legal_kind[i].item() == int(record["kind"])
         assert batch.illegal_reason[i].item() == int(record["reason"])
+
+
+def test_real_records_have_exactly_one_en_passant_entry(real_dataset):
+    loader = cr.make_loader(
+        real_dataset, 256, num_workers=0, shuffle=False, pin_memory=False
+    )
+    group = cr.unpack(next(iter(loader))).board[:, cr.BOARD_EN_PASSANT]
+
+    assert torch.all(group.sum(dim=1) == 1)
+    assert group[:, cr.BOARD_SIZE].sum() < len(
+        group
+    )  # some records do have an en passant file
 
 
 def test_a_real_epoch_contains_every_kind_and_reason(real_dataset):
