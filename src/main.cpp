@@ -2,7 +2,7 @@
 //
 //   chess-rules --out train.bin --samples-per-kind 1000000 --split train --variant mixed --threads 8 --seed 1
 //
-// Writes <out> (80-byte records, see nw::Example) and <out>.json (layout, counts per bucket).
+// Writes <out> (80-byte records, see cr::Example) and <out>.json (layout, counts per bucket).
 
 #include <algorithm>
 #include <chrono>
@@ -40,7 +40,7 @@ struct Args {
     std::uint64_t per_kind = 0;
     std::uint64_t seed     = 1;
     int split              = -1;
-    nw::Variant variant    = nw::Variant::MIXED;
+    cr::Variant variant    = cr::Variant::MIXED;
     int threads            = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
     bool shuffle           = true;
     bool verbose           = false;
@@ -83,7 +83,7 @@ Args parse_args(int argc, char** argv) {
         } else if (a == "--variant") {
             const std::string v = next();
             args.variant =
-                v == "standard" ? nw::Variant::STANDARD : (v == "960" ? nw::Variant::CHESS960 : nw::Variant::MIXED);
+                v == "standard" ? cr::Variant::STANDARD : (v == "960" ? cr::Variant::CHESS960 : cr::Variant::MIXED);
             if (v != "standard" && v != "960" && v != "mixed") {
                 exit_with_message("variant must be standard, 960 or mixed");
             }
@@ -121,15 +121,15 @@ Args parse_args(int argc, char** argv) {
     return args;
 }
 
-std::pair<std::vector<nw::Example>, nw::Stats> run(const Args& args) {
-    const auto starts = split_chess960_starts(0)[args.split];
+std::pair<std::vector<cr::Example>, cr::Stats> run(const Args& args) {
+    const auto starts = cr::split_chess960_starts(0)[args.split];
 
-    std::vector<std::vector<nw::Example>> parts(args.threads);
-    std::vector<nw::Stats> stats(args.threads);
+    std::vector<std::vector<cr::Example>> parts(args.threads);
+    std::vector<cr::Stats> stats(args.threads);
     std::vector<std::thread> pool;
     for (int t = 0; t < args.threads; ++t) {
         pool.emplace_back([&, t] {
-            nw::Config cfg;
+            cr::Config cfg;
             cfg.kind_target =
                 args.per_kind / args.threads + (static_cast<std::uint64_t>(t) < args.per_kind % args.threads ? 1 : 0);
             cfg.seed    = args.seed * 0x9E3779B97F4A7C15ull + static_cast<std::uint64_t>(t) * 0xD1B54A32D192ED03ull + 1;
@@ -138,7 +138,7 @@ std::pair<std::vector<nw::Example>, nw::Stats> run(const Args& args) {
             cfg.starts  = starts;
             cfg.min_play_share = args.play_share;
             cfg.verbose        = args.verbose && t == 0;
-            nw::Shard shard(cfg);
+            cr::Shard shard(cfg);
             shard.run(parts[t]);
             stats[t] = shard.stats();
         });
@@ -148,17 +148,17 @@ std::pair<std::vector<nw::Example>, nw::Stats> run(const Args& args) {
         th.join();
     }
 
-    std::vector<nw::Example> all;
-    all.reserve(args.per_kind * nw::NUM_KINDS);
-    nw::Stats total;
+    std::vector<cr::Example> all;
+    all.reserve(args.per_kind * cr::NUM_KINDS);
+    cr::Stats total;
     for (int t = 0; t < args.threads; ++t) {
         all.insert(all.end(), parts[t].begin(), parts[t].end());
         total.merge(stats[t]);
-        std::vector<nw::Example>().swap(parts[t]);
+        std::vector<cr::Example>().swap(parts[t]);
     }
 
     if (args.shuffle) {
-        nw::Rng rng(args.seed ^ 0xABCDEF);
+        cr::Rng rng(args.seed ^ 0xABCDEF);
         for (std::size_t i = all.size() - 1; i > 0; --i) {
             std::swap(all[i], all[rng.below(static_cast<std::uint32_t>(i + 1))]);
         }
@@ -167,16 +167,16 @@ std::pair<std::vector<nw::Example>, nw::Stats> run(const Args& args) {
     return {all, total};
 }
 
-void write_bin(const std::filesystem::path& path, const std::vector<nw::Example>& examples) {
+void write_bin(const std::filesystem::path& path, const std::vector<cr::Example>& examples) {
     std::ofstream f(path, std::ios::binary);
     if (!f) {
         exit_with_message("cannot open output file");
     }
     f.write(reinterpret_cast<const char*>(examples.data()),
-            static_cast<std::streamsize>(examples.size() * sizeof(nw::Example)));
+            static_cast<std::streamsize>(examples.size() * sizeof(cr::Example)));
 }
 
-void write_json(const std::filesystem::path& path, const Args& args, const nw::Stats stats,
+void write_json(const std::filesystem::path& path, const Args& args, const cr::Stats stats,
                 const std::size_t num_examples, const double secs) {
     std::ofstream j(path);
     j << "{\n  \"record_bytes\": 80,\n  \"examples\": " << num_examples << ",\n  \"seed\": " << args.seed
@@ -185,8 +185,8 @@ void write_json(const std::filesystem::path& path, const Args& args, const nw::S
           : args.split == 1 ? "eval"
                             : "test")
       << "\",\n  \"variant\": \""
-      << (args.variant == nw::Variant::STANDARD   ? "standard"
-          : args.variant == nw::Variant::CHESS960 ? "960"
+      << (args.variant == cr::Variant::STANDARD   ? "standard"
+          : args.variant == cr::Variant::CHESS960 ? "960"
                                                   : "mixed")
       << "\",\n  \"threads\": " << args.threads << ",\n  \"seconds\": " << secs << ",\n";
     j << "  \"layout\": {\n"
@@ -199,24 +199,24 @@ void write_json(const std::filesystem::path& path, const Args& args, const nw::S
          "    \"white_to_move\": \"uint8\",\n"
          "    \"legal_kind, illegal_reason\": \"uint8 bucket ids, names below\"\n  },\n";
     j << "  \"kinds\": {";
-    for (int k = 0; k < nw::NUM_KINDS; ++k) {
-        j << (k ? ", " : "") << "\"" << nw::kind_name(k) << "\": " << stats.kind[k];
+    for (int k = 0; k < cr::NUM_KINDS; ++k) {
+        j << (k ? ", " : "") << "\"" << cr::kind_name(k) << "\": " << stats.kind[k];
     }
     j << "},\n  \"reasons\": {";
-    for (int r = 0; r < nw::NUM_REASONS; ++r) {
-        j << (r ? ", " : "") << "\"" << nw::reason_name(r) << "\": " << stats.reason[r];
+    for (int r = 0; r < cr::NUM_REASONS; ++r) {
+        j << (r ? ", " : "") << "\"" << cr::reason_name(r) << "\": " << stats.reason[r];
     }
     j << "},\n  \"kind_names\": [";
-    for (int k = 0; k < nw::NUM_KINDS; ++k) {
-        j << (k ? ", " : "") << "\"" << nw::kind_name(k) << "\"";
+    for (int k = 0; k < cr::NUM_KINDS; ++k) {
+        j << (k ? ", " : "") << "\"" << cr::kind_name(k) << "\"";
     }
     j << "],\n  \"reason_names\": [";
-    for (int r = 0; r < nw::NUM_REASONS; ++r) {
-        j << (r ? ", " : "") << "\"" << nw::reason_name(r) << "\"";
+    for (int r = 0; r < cr::NUM_REASONS; ++r) {
+        j << (r ? ", " : "") << "\"" << cr::reason_name(r) << "\"";
     }
     j << "],\n  \"examples_by_source\": {";
-    for (int s = 0; s < nw::Shard::NUM_SOURCES; ++s) {
-        j << (s ? ", " : "") << "\"" << nw::Shard::source_name(s) << "\": " << stats.source_examples[s];
+    for (int s = 0; s < cr::Shard::NUM_SOURCES; ++s) {
+        j << (s ? ", " : "") << "\"" << cr::Shard::source_name(s) << "\": " << stats.source_examples[s];
     }
     j << "}\n}\n";
 }

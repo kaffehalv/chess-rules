@@ -13,7 +13,7 @@
 
 #include "chess.hpp"
 
-namespace nw {
+namespace cr {
 
 // ---------------------------------------------------------------------------------------------
 // Random numbers (xoshiro256**): fast and identical on every platform, unlike <random> distributions.
@@ -206,8 +206,8 @@ struct Example {
     std::uint16_t illegal_move;
     std::uint8_t ep_file;         // file of the last double pawn push, 255 if the last move was not one
     std::uint8_t white_to_move;   // 1 / 0
-    std::uint8_t legal_kind;      // nw::Kind
-    std::uint8_t illegal_reason;  // nw::Reason
+    std::uint8_t legal_kind;      // cr::Kind
+    std::uint8_t illegal_reason;  // cr::Reason
 
     Code legal() const { return Code::from_raw(legal_move).value(); }
     Code illegal() const { return Code::from_raw(illegal_move).value(); }
@@ -594,4 +594,4 @@ inline void Analysis::analyze_pseudo(const chess::Board& b) {
     }
 }
 
-}  // namespace nw
+}  // namespace cr

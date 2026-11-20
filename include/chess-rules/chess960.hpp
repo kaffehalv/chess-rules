@@ -7,6 +7,8 @@
 #include <utility>
 #include <vector>
 
+namespace cr {
+
 // Scharnagl numbering (0..959); 518 is the standard start position.
 inline std::string chess960_fen(const int idx) {
     std::array<char, 8> rank;
@@ -68,3 +70,5 @@ inline std::array<std::vector<int>, 3> split_chess960_starts(const std::uint32_t
     return {{std::vector<int>(idx.begin(), idx.begin() + 768), std::vector<int>(idx.begin() + 768, idx.begin() + 864),
              std::vector<int>(idx.begin() + 864, idx.end())}};
 }
+
+}  // namespace cr

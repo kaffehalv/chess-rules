@@ -1,0 +1,3 @@
+# Makes py/ its own ruff project, so that chess_rules is a first party module wherever ruff runs.
+[lint.isort]
+known-first-party = ["chess_rules"]

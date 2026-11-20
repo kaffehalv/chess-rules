@@ -16,14 +16,14 @@ std::string white_back_rank(const std::string& fen) {
 }  // namespace
 
 TEST_CASE("start position 518 is the standard chess position", "[chess960]") {
-    REQUIRE(chess960_fen(518) == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    REQUIRE(cr::chess960_fen(518) == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 }
 
 TEST_CASE("the 960 start positions are distinct and follow the Chess960 rules", "[chess960]") {
     std::set<std::string> back_ranks;
 
     for (int i = 0; i < 960; ++i) {
-        const std::string rank = white_back_rank(chess960_fen(i));
+        const std::string rank = white_back_rank(cr::chess960_fen(i));
         back_ranks.insert(rank);
 
         int bishops_on_light  = 0;
@@ -67,7 +67,7 @@ TEST_CASE("the 960 start positions are distinct and follow the Chess960 rules", 
 
 TEST_CASE("the library accepts every start position with all four castling rights", "[chess960]") {
     for (int i = 0; i < 960; ++i) {
-        const chess::Board board(chess960_fen(i), true);
+        const chess::Board board(cr::chess960_fen(i), true);
         const auto rights    = board.castlingRights();
         const auto king_file = static_cast<int>(board.kingSq(chess::Color::WHITE).file());
 
@@ -84,7 +84,7 @@ TEST_CASE("the library accepts every start position with all four castling right
 }
 
 TEST_CASE("the start positions are split into disjoint train, validation and test sets", "[chess960]") {
-    const auto split = split_chess960_starts(0);
+    const auto split = cr::split_chess960_starts(0);
 
     REQUIRE(split[0].size() == 768);
     REQUIRE(split[1].size() == 96);
@@ -99,10 +99,10 @@ TEST_CASE("the start positions are split into disjoint train, validation and tes
     REQUIRE(*all.rbegin() == 959);
 
     SECTION("the split is deterministic") {
-        REQUIRE(split_chess960_starts(0) == split);
+        REQUIRE(cr::split_chess960_starts(0) == split);
     }
 
     SECTION("a different seed gives a different split") {
-        REQUIRE(split_chess960_starts(1) != split);
+        REQUIRE(cr::split_chess960_starts(1) != split);
     }
 }

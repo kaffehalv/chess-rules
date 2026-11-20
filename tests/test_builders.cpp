@@ -6,8 +6,8 @@
 
 namespace {
 
-nw::Config small_config(const std::uint64_t seed) {
-    nw::Config config;
+cr::Config small_config(const std::uint64_t seed) {
+    cr::Config config;
     config.kind_target       = 100;
     config.seed              = seed;
     config.calibration_iters = 1000;
@@ -21,11 +21,11 @@ constexpr std::uint64_t BACK_RANKS = 0xFF000000000000FFull;
 }  // namespace
 
 TEST_CASE("every builder produces valid positions", "[builders]") {
-    const auto source = GENERATE(nw::Shard::SPARSE, nw::Shard::CASTLE, nw::Shard::EP, nw::Shard::PROMO, nw::Shard::PIN,
-                                 nw::Shard::TERMINAL);
-    INFO("source: " << nw::Shard::source_name(source));
+    const auto source = GENERATE(cr::Shard::SPARSE, cr::Shard::CASTLE, cr::Shard::EP, cr::Shard::PROMO, cr::Shard::PIN,
+                                 cr::Shard::TERMINAL);
+    INFO("source: " << cr::Shard::source_name(source));
 
-    nw::Shard shard(small_config(5));
+    cr::Shard shard(small_config(5));
     int built = 0;
 
     for (int i = 0; i < ATTEMPTS; ++i) {
@@ -43,7 +43,7 @@ TEST_CASE("every builder produces valid positions", "[builders]") {
             chess::attacks::king(board.kingSq(chess::Color::WHITE)).check(board.kingSq(chess::Color::BLACK).index()));
         REQUIRE((board.pieces(chess::PieceType::PAWN).getBits() & BACK_RANKS) == 0);
 
-        if (source != nw::Shard::TERMINAL) {
+        if (source != cr::Shard::TERMINAL) {
             // the side that is not to move must not be in check (the terminal builder has already played its move)
             REQUIRE_FALSE(board.isAttacked(board.kingSq(~stm), stm));
         }
@@ -53,12 +53,12 @@ TEST_CASE("every builder produces valid positions", "[builders]") {
 }
 
 TEST_CASE("the terminal builder only produces checkmates and stalemates", "[builders]") {
-    nw::Shard shard(small_config(6));
+    cr::Shard shard(small_config(6));
     int mates      = 0;
     int stalemates = 0;
 
     for (int i = 0; i < ATTEMPTS; ++i) {
-        if (!shard.build(nw::Shard::TERMINAL)) {
+        if (!shard.build(cr::Shard::TERMINAL)) {
             continue;
         }
         shard.an_.analyze_legal(shard.scratch_);
@@ -75,12 +75,12 @@ TEST_CASE("the terminal builder only produces checkmates and stalemates", "[buil
 }
 
 TEST_CASE("the en passant builder records the file of the double push", "[builders]") {
-    nw::Shard shard(small_config(7));
+    cr::Shard shard(small_config(7));
     int built              = 0;
     int illegal_en_passant = 0;
 
     for (int i = 0; i < ATTEMPTS; ++i) {
-        if (!shard.build(nw::Shard::EP)) {
+        if (!shard.build(cr::Shard::EP)) {
             continue;
         }
         ++built;
@@ -95,7 +95,7 @@ TEST_CASE("the en passant builder records the file of the double push", "[builde
 
         shard.an_.analyze_legal(board);
         shard.an_.analyze_pseudo(board);
-        if (!shard.an_.ks[nw::KS_EP - nw::KS_FIRST].empty()) {
+        if (!shard.an_.ks[cr::KS_EP - cr::KS_FIRST].empty()) {
             ++illegal_en_passant;
         }
     }
@@ -105,22 +105,22 @@ TEST_CASE("the en passant builder records the file of the double push", "[builde
 }
 
 TEST_CASE("the castle builder produces castling moves and castling mistakes", "[builders]") {
-    nw::Shard shard(small_config(8));
+    cr::Shard shard(small_config(8));
     int legal_castles   = 0;
     int unsafe_castles  = 0;
     int rule_violations = 0;
 
     for (int i = 0; i < ATTEMPTS; ++i) {
-        if (!shard.build(nw::Shard::CASTLE)) {
+        if (!shard.build(cr::Shard::CASTLE)) {
             continue;
         }
         shard.an_.analyze_legal(shard.scratch_);
         shard.an_.analyze_pseudo(shard.scratch_);
 
         legal_castles +=
-            shard.an_.kind_available(nw::CASTLING_KINGSIDE) || shard.an_.kind_available(nw::CASTLING_QUEENSIDE);
-        unsafe_castles += !shard.an_.ks[nw::KS_CASTLING - nw::KS_FIRST].empty();
-        rule_violations += shard.propose(nw::CASTLING_RULE, shard.scratch_).has_value();
+            shard.an_.kind_available(cr::CASTLING_KINGSIDE) || shard.an_.kind_available(cr::CASTLING_QUEENSIDE);
+        unsafe_castles += !shard.an_.ks[cr::KS_CASTLING - cr::KS_FIRST].empty();
+        rule_violations += shard.propose(cr::CASTLING_RULE, shard.scratch_).has_value();
     }
 
     REQUIRE(legal_castles > 1000);
@@ -129,31 +129,31 @@ TEST_CASE("the castle builder produces castling moves and castling mistakes", "[
 }
 
 TEST_CASE("the pin builder produces pinned pieces", "[builders]") {
-    nw::Shard shard(small_config(9));
+    cr::Shard shard(small_config(9));
     int pins = 0;
 
     for (int i = 0; i < ATTEMPTS; ++i) {
-        if (!shard.build(nw::Shard::PIN)) {
+        if (!shard.build(cr::Shard::PIN)) {
             continue;
         }
         shard.an_.analyze_legal(shard.scratch_);
         shard.an_.analyze_pseudo(shard.scratch_);
-        pins += !shard.an_.ks[nw::KS_PINNED - nw::KS_FIRST].empty();
+        pins += !shard.an_.ks[cr::KS_PINNED - cr::KS_FIRST].empty();
     }
 
     REQUIRE(pins > 1000);
 }
 
 TEST_CASE("the promotion builder produces promotions", "[builders]") {
-    nw::Shard shard(small_config(10));
+    cr::Shard shard(small_config(10));
     int promotions = 0;
 
     for (int i = 0; i < ATTEMPTS; ++i) {
-        if (!shard.build(nw::Shard::PROMO)) {
+        if (!shard.build(cr::Shard::PROMO)) {
             continue;
         }
         shard.an_.analyze_legal(shard.scratch_);
-        promotions += shard.an_.kind_available(nw::PAWN_PROMOTION);
+        promotions += shard.an_.kind_available(cr::PAWN_PROMOTION);
     }
 
     REQUIRE(promotions > 1000);

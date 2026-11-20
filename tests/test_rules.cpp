@@ -18,16 +18,16 @@ struct Position {
         analysis.analyze_pseudo(board);
     }
 
-    nw::Reason classify(const char* from, const char* to, int promo = 0) const {
-        return nw::classify(board, analysis, nw::Code(sq(from), sq(to), promo));
+    cr::Reason classify(const char* from, const char* to, int promo = 0) const {
+        return cr::classify(board, analysis, cr::Code(sq(from), sq(to), promo));
     }
 
     bool is_legal(const char* from, const char* to, int promo = 0) const {
-        return analysis.legal_set.contains(nw::Code(sq(from), sq(to), promo));
+        return analysis.legal_set.contains(cr::Code(sq(from), sq(to), promo));
     }
 
     chess::Board board;
-    nw::Analysis analysis;
+    cr::Analysis analysis;
 };
 
 constexpr int KNIGHT_PROMO = 1;
@@ -37,42 +37,42 @@ constexpr int QUEEN_PROMO  = 4;
 }  // namespace
 
 TEST_CASE("a Code keeps from, to and promotion apart", "[rules][code]") {
-    const nw::Code code(sq("e7"), sq("e8"), nw::QUEEN_PROMOTION);
+    const cr::Code code(sq("e7"), sq("e8"), cr::QUEEN_PROMOTION);
     REQUIRE(code.from() == sq("e7"));
     REQUIRE(code.to() == sq("e8"));
-    REQUIRE(code.promo() == nw::QUEEN_PROMOTION);
+    REQUIRE(code.promo() == cr::QUEEN_PROMOTION);
 
     SECTION("a promotion can be added and removed") {
-        REQUIRE(code.without_promo() == nw::Code(sq("e7"), sq("e8")));
-        REQUIRE(code.without_promo().with_promo(nw::QUEEN_PROMOTION) == code);
-        REQUIRE(code.with_promo(nw::KNIGHT_PROMOTION) != code);
+        REQUIRE(code.without_promo() == cr::Code(sq("e7"), sq("e8")));
+        REQUIRE(code.without_promo().with_promo(cr::QUEEN_PROMOTION) == code);
+        REQUIRE(code.with_promo(cr::KNIGHT_PROMOTION) != code);
     }
 
     SECTION("the raw value has the documented layout") {
-        REQUIRE(code.raw() == (sq("e8") | sq("e7") << 6 | nw::QUEEN_PROMOTION << 12));
+        REQUIRE(code.raw() == (sq("e8") | sq("e7") << 6 | cr::QUEEN_PROMOTION << 12));
     }
 
     SECTION("resign is b1b1") {
-        static_assert(nw::Code::resign() == nw::Code(1, 1));
-        REQUIRE(nw::Code::resign() == nw::Code(sq("b1"), sq("b1")));
-        REQUIRE(nw::Code::resign().raw() == 65);
+        static_assert(cr::Code::resign() == cr::Code(1, 1));
+        REQUIRE(cr::Code::resign() == cr::Code(sq("b1"), sq("b1")));
+        REQUIRE(cr::Code::resign().raw() == 65);
     }
 
     SECTION("the raw values are a dense index and the codes are ordered") {
-        REQUIRE(nw::Code(0, 0).raw() == 0);
-        REQUIRE(nw::Code(63, 63, nw::QUEEN_PROMOTION).raw() == nw::Code::COUNT - 1);
-        REQUIRE(nw::Code(0, 1) < nw::Code(0, 2));
+        REQUIRE(cr::Code(0, 0).raw() == 0);
+        REQUIRE(cr::Code(63, 63, cr::QUEEN_PROMOTION).raw() == cr::Code::COUNT - 1);
+        REQUIRE(cr::Code(0, 1) < cr::Code(0, 2));
     }
 }
 
 TEST_CASE("only valid values become codes", "[rules][code]") {
-    REQUIRE(nw::Code::from_raw(0).has_value());
-    REQUIRE(nw::Code::from_raw(nw::Code::COUNT - 1).has_value());
-    REQUIRE(nw::Code::from_raw(65).value() == nw::Code::resign());
+    REQUIRE(cr::Code::from_raw(0).has_value());
+    REQUIRE(cr::Code::from_raw(cr::Code::COUNT - 1).has_value());
+    REQUIRE(cr::Code::from_raw(65).value() == cr::Code::resign());
 
-    REQUIRE_FALSE(nw::Code::from_raw(nw::Code::COUNT).has_value());
-    REQUIRE_FALSE(nw::Code::from_raw(5 << 12).has_value());  // a promotion piece that does not exist
-    REQUIRE_FALSE(nw::Code::from_raw(0xFFFF).has_value());
+    REQUIRE_FALSE(cr::Code::from_raw(cr::Code::COUNT).has_value());
+    REQUIRE_FALSE(cr::Code::from_raw(5 << 12).has_value());  // a promotion piece that does not exist
+    REQUIRE_FALSE(cr::Code::from_raw(0xFFFF).has_value());
 }
 
 TEST_CASE("a Code does not depend on the type of the library move", "[rules][code]") {
@@ -85,33 +85,33 @@ TEST_CASE("a Code does not depend on the type of the library move", "[rules][cod
         const auto plain      = chess::Move::make<chess::Move::NORMAL>(e5, d6);
         const auto en_passant = chess::Move::make<chess::Move::ENPASSANT>(e5, d6);
         REQUIRE(plain != en_passant);  // what made illegal moves collide with legal ones
-        REQUIRE(nw::Code::of(plain) == nw::Code::of(en_passant));
+        REQUIRE(cr::Code::of(plain) == cr::Code::of(en_passant));
     }
 
     SECTION("castling and king takes own rook") {
         const auto plain    = chess::Move::make<chess::Move::NORMAL>(e1, h1);
         const auto castling = chess::Move::make<chess::Move::CASTLING>(e1, h1);
         REQUIRE(plain != castling);
-        REQUIRE(nw::Code::of(plain) == nw::Code::of(castling));
+        REQUIRE(cr::Code::of(plain) == cr::Code::of(castling));
     }
 
     SECTION("the promotion piece is kept") {
         const auto a7 = chess::Square("a7");
         const auto a8 = chess::Square("a8");
-        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::KNIGHT)).promo() ==
-                nw::KNIGHT_PROMOTION);
-        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::BISHOP)).promo() ==
-                nw::BISHOP_PROMOTION);
-        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::ROOK)).promo() ==
-                nw::ROOK_PROMOTION);
-        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::QUEEN)).promo() ==
-                nw::QUEEN_PROMOTION);
-        REQUIRE(nw::Code::of(chess::Move::make<chess::Move::NORMAL>(a7, a8)).promo() == nw::NO_PROMOTION);
+        REQUIRE(cr::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::KNIGHT)).promo() ==
+                cr::KNIGHT_PROMOTION);
+        REQUIRE(cr::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::BISHOP)).promo() ==
+                cr::BISHOP_PROMOTION);
+        REQUIRE(cr::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::ROOK)).promo() ==
+                cr::ROOK_PROMOTION);
+        REQUIRE(cr::Code::of(chess::Move::make<chess::Move::PROMOTION>(a7, a8, chess::PieceType::QUEEN)).promo() ==
+                cr::QUEEN_PROMOTION);
+        REQUIRE(cr::Code::of(chess::Move::make<chess::Move::NORMAL>(a7, a8)).promo() == cr::NO_PROMOTION);
     }
 }
 
 TEST_CASE("the record has the documented size", "[rules][code]") {
-    REQUIRE(sizeof(nw::Example) == 80);
+    REQUIRE(sizeof(cr::Example) == 80);
 }
 
 TEST_CASE("library moves are encoded the way the dataset describes", "[rules]") {
@@ -130,9 +130,9 @@ TEST_CASE("library moves are encoded the way the dataset describes", "[rules]") 
 }
 
 TEST_CASE("the random number generator is reproducible and in range", "[rules]") {
-    nw::Rng first(42);
-    nw::Rng second(42);
-    nw::Rng other(43);
+    cr::Rng first(42);
+    cr::Rng second(42);
+    cr::Rng other(43);
 
     bool differs = false;
     for (int i = 0; i < 100; ++i) {
@@ -142,7 +142,7 @@ TEST_CASE("the random number generator is reproducible and in range", "[rules]")
     }
     REQUIRE(differs);
 
-    nw::Rng rng(1);
+    cr::Rng rng(1);
     for (int i = 0; i < 10000; ++i) {
         REQUIRE(rng.below(7) < 7);
         const double u = rng.uniform();
@@ -155,15 +155,15 @@ TEST_CASE("the random number generator is reproducible and in range", "[rules]")
 
     const std::uint64_t bits = 0b1010'0100'0000;
     for (int i = 0; i < 100; ++i) {
-        REQUIRE(((bits >> nw::pick_bit(bits, rng)) & 1) == 1);
+        REQUIRE(((bits >> cr::pick_bit(bits, rng)) & 1) == 1);
     }
 }
 
 TEST_CASE("CodeSet inserts, finds and clears in constant time", "[rules]") {
-    const nw::Code first(sq("e2"), sq("e4"));
-    const nw::Code last(63, 63, nw::QUEEN_PROMOTION);  // the largest possible code
+    const cr::Code first(sq("e2"), sq("e4"));
+    const cr::Code last(63, 63, cr::QUEEN_PROMOTION);  // the largest possible code
 
-    nw::CodeSet set;
+    cr::CodeSet set;
     REQUIRE_FALSE(set.contains(first));
 
     set.insert(first);
@@ -171,7 +171,7 @@ TEST_CASE("CodeSet inserts, finds and clears in constant time", "[rules]") {
     set.insert(last);
     REQUIRE(set.contains(first));
     REQUIRE(set.contains(last));
-    REQUIRE_FALSE(set.contains(nw::Code(sq("e2"), sq("e3"))));
+    REQUIRE_FALSE(set.contains(cr::Code(sq("e2"), sq("e3"))));
     REQUIRE(set.size() == 2);
 
     set.clear();
@@ -183,89 +183,89 @@ TEST_CASE("CodeSet inserts, finds and clears in constant time", "[rules]") {
 TEST_CASE("every illegal reason is recognised", "[rules]") {
     SECTION("same square") {
         const Position position(chess::constants::STARTPOS);
-        REQUIRE(position.classify("e2", "e2") == nw::SAME_SQUARE);
+        REQUIRE(position.classify("e2", "e2") == cr::SAME_SQUARE);
     }
 
     SECTION("empty from square") {
         const Position position(chess::constants::STARTPOS);
-        REQUIRE(position.classify("e4", "e5") == nw::EMPTY_FROM);
+        REQUIRE(position.classify("e4", "e5") == cr::EMPTY_FROM);
     }
 
     SECTION("opponent piece") {
         const Position position(chess::constants::STARTPOS);
-        REQUIRE(position.classify("e7", "e5") == nw::OPPONENT_PIECE);
+        REQUIRE(position.classify("e7", "e5") == cr::OPPONENT_PIECE);
     }
 
     SECTION("own capture") {
         const Position position(chess::constants::STARTPOS);
-        REQUIRE(position.classify("a1", "a2") == nw::OWN_CAPTURE);
-        REQUIRE(position.classify("e2", "d3") == nw::PAWN_RULE);  // not an own capture: nothing stands on d3
+        REQUIRE(position.classify("a1", "a2") == cr::OWN_CAPTURE);
+        REQUIRE(position.classify("e2", "d3") == cr::PAWN_RULE);  // not an own capture: nothing stands on d3
     }
 
     SECTION("geometry") {
         const Position position(chess::constants::STARTPOS);
-        REQUIRE(position.classify("b1", "b4") == nw::GEOMETRY);
-        REQUIRE(position.classify("e1", "e3") == nw::GEOMETRY);
+        REQUIRE(position.classify("b1", "b4") == cr::GEOMETRY);
+        REQUIRE(position.classify("e1", "e3") == cr::GEOMETRY);
     }
 
     SECTION("blocked slider") {
         const Position position(chess::constants::STARTPOS);
-        REQUIRE(position.classify("a1", "a5") == nw::BLOCKED);
-        REQUIRE(position.classify("c1", "h6") == nw::BLOCKED);
+        REQUIRE(position.classify("a1", "a5") == cr::BLOCKED);
+        REQUIRE(position.classify("c1", "h6") == cr::BLOCKED);
     }
 
     SECTION("blocked pawn") {
         const Position position("4k3/8/8/8/8/4p3/4P3/4K3 w - - 0 1");
-        REQUIRE(position.classify("e2", "e3") == nw::PAWN_BLOCKED);
-        REQUIRE(position.classify("e2", "e4") == nw::PAWN_BLOCKED);
+        REQUIRE(position.classify("e2", "e3") == cr::PAWN_BLOCKED);
+        REQUIRE(position.classify("e2", "e4") == cr::PAWN_BLOCKED);
     }
 
     SECTION("other pawn mistakes") {
         const Position position(chess::constants::STARTPOS);
-        REQUIRE(position.classify("e2", "e1") == nw::PAWN_RULE);
-        REQUIRE(position.classify("e2", "f2") == nw::PAWN_RULE);
-        REQUIRE(position.classify("e2", "e5") == nw::PAWN_RULE);
+        REQUIRE(position.classify("e2", "e1") == cr::PAWN_RULE);
+        REQUIRE(position.classify("e2", "f2") == cr::PAWN_RULE);
+        REQUIRE(position.classify("e2", "e5") == cr::PAWN_RULE);
     }
 
     SECTION("promotion rule") {
         const Position position("4k3/P7/8/8/8/8/8/4K3 w - - 0 1");
-        REQUIRE(position.classify("a7", "a8") == nw::PROMOTION_RULE);
-        REQUIRE(position.classify("a7", "a6", ROOK_PROMO) == nw::PROMOTION_RULE);
-        REQUIRE(position.classify("e1", "f1", QUEEN_PROMO) == nw::PROMOTION_RULE);
+        REQUIRE(position.classify("a7", "a8") == cr::PROMOTION_RULE);
+        REQUIRE(position.classify("a7", "a6", ROOK_PROMO) == cr::PROMOTION_RULE);
+        REQUIRE(position.classify("e1", "f1", QUEEN_PROMO) == cr::PROMOTION_RULE);
         REQUIRE(position.is_legal("a7", "a8", QUEEN_PROMO));
     }
 
     SECTION("castling rule") {
         const Position no_rights("r3k2r/8/8/8/8/8/8/R3K2R w - - 0 1");
-        REQUIRE(no_rights.classify("e1", "h1") == nw::CASTLING_RULE);
+        REQUIRE(no_rights.classify("e1", "h1") == cr::CASTLING_RULE);
 
         const Position blocked("r3k2r/8/8/8/8/8/8/RN2K2R w KQkq - 0 1");
-        REQUIRE(blocked.classify("e1", "a1") == nw::CASTLING_RULE);
+        REQUIRE(blocked.classify("e1", "a1") == cr::CASTLING_RULE);
         REQUIRE(blocked.is_legal("e1", "h1"));
     }
 
     SECTION("king steps into check") {
         const Position position("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1");
-        REQUIRE(position.classify("e1", "d2") == nw::KS_KING_STEP);
+        REQUIRE(position.classify("e1", "d2") == cr::KS_KING_STEP);
         REQUIRE(position.is_legal("e1", "e2"));
     }
 
     SECTION("pinned piece") {
         const Position position("4k3/8/8/8/4r3/8/4R3/4K3 w - - 0 1");
-        REQUIRE(position.classify("e2", "a2") == nw::KS_PINNED);
+        REQUIRE(position.classify("e2", "a2") == cr::KS_PINNED);
         REQUIRE(position.is_legal("e2", "e3"));
     }
 
     SECTION("check is not resolved") {
         const Position position("4k3/8/8/8/8/8/P3r3/4K3 w - - 0 1");
         REQUIRE(position.analysis.in_check);
-        REQUIRE(position.classify("a2", "a3") == nw::KS_UNRESOLVED_CHECK);
+        REQUIRE(position.classify("a2", "a3") == cr::KS_UNRESOLVED_CHECK);
     }
 
     SECTION("castling through an attacked square") {
         const Position position("r3k2r/8/8/8/8/8/5r2/R3K2R w KQkq - 0 1");
         REQUIRE(position.is_legal("e1", "a1"));
-        REQUIRE(position.classify("e1", "h1") == nw::KS_CASTLING);
+        REQUIRE(position.classify("e1", "h1") == cr::KS_CASTLING);
     }
 
     SECTION("en passant that exposes the king along the rank") {
@@ -274,55 +274,55 @@ TEST_CASE("every illegal reason is recognised", "[rules]") {
         chess::Movelist moves;
         chess::movegen::legalmoves(moves, board);
         for (const chess::Move move : moves) {
-            if (nw::Code::of(move) == nw::Code(sq("e7"), sq("e5"))) {
+            if (cr::Code::of(move) == cr::Code(sq("e7"), sq("e5"))) {
                 board.makeMove(move);
                 break;
             }
         }
-        nw::Analysis analysis;
+        cr::Analysis analysis;
         analysis.analyze_legal(board);
         analysis.analyze_pseudo(board);
 
-        const nw::Code ep(sq("d5"), sq("e6"));
+        const cr::Code ep(sq("d5"), sq("e6"));
         REQUIRE_FALSE(analysis.legal_set.contains(ep));
         REQUIRE(analysis.pseudo_set.contains(ep));
-        REQUIRE(nw::classify(board, analysis, ep) == nw::KS_EP);
+        REQUIRE(cr::classify(board, analysis, ep) == cr::KS_EP);
     }
 }
 
 TEST_CASE("legal moves and the resign code are never illegal", "[rules]") {
     const Position position(chess::constants::STARTPOS);
-    REQUIRE(position.classify("e2", "e4") == nw::R_LEGAL);
-    REQUIRE(position.classify("b1", "c3") == nw::R_LEGAL);
-    REQUIRE(nw::classify(position.board, position.analysis, nw::Code::resign()) == nw::R_LEGAL);
+    REQUIRE(position.classify("e2", "e4") == cr::R_LEGAL);
+    REQUIRE(position.classify("b1", "c3") == cr::R_LEGAL);
+    REQUIRE(cr::classify(position.board, position.analysis, cr::Code::resign()) == cr::R_LEGAL);
 }
 
 TEST_CASE("legal move kinds", "[rules]") {
     const auto kind_of_move = [](const std::string& fen, const std::string& uci) {
         chess::Board board(fen, true);
-        return nw::kind_of(board, chess::uci::uciToMove(board, uci));
+        return cr::kind_of(board, chess::uci::uciToMove(board, uci));
     };
 
-    REQUIRE(kind_of_move(chess::constants::STARTPOS, "e2e3") == nw::PAWN_SINGLE);
-    REQUIRE(kind_of_move(chess::constants::STARTPOS, "e2e4") == nw::PAWN_DOUBLE);
-    REQUIRE(kind_of_move(chess::constants::STARTPOS, "b1c3") == nw::KNIGHT);
-    REQUIRE(kind_of_move("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1", "e4d5") == nw::PAWN_ATTACK);
-    REQUIRE(kind_of_move("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q") == nw::PAWN_PROMOTION);
-    REQUIRE(kind_of_move("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6") == nw::PAWN_ENPASSANT);
-    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1h1") == nw::CASTLING_KINGSIDE);
-    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1a1") == nw::CASTLING_QUEENSIDE);
-    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "a1a5") == nw::ROOK);
-    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1d1") == nw::KING);
+    REQUIRE(kind_of_move(chess::constants::STARTPOS, "e2e3") == cr::PAWN_SINGLE);
+    REQUIRE(kind_of_move(chess::constants::STARTPOS, "e2e4") == cr::PAWN_DOUBLE);
+    REQUIRE(kind_of_move(chess::constants::STARTPOS, "b1c3") == cr::KNIGHT);
+    REQUIRE(kind_of_move("4k3/8/8/3p4/4P3/8/8/4K3 w - - 0 1", "e4d5") == cr::PAWN_ATTACK);
+    REQUIRE(kind_of_move("4k3/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q") == cr::PAWN_PROMOTION);
+    REQUIRE(kind_of_move("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6") == cr::PAWN_ENPASSANT);
+    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1h1") == cr::CASTLING_KINGSIDE);
+    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1a1") == cr::CASTLING_QUEENSIDE);
+    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "a1a5") == cr::ROOK);
+    REQUIRE(kind_of_move("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1d1") == cr::KING);
 }
 
 TEST_CASE("the classifier agrees with the library on every possible move code", "[rules][slow]") {
-    nw::Rng rng(7);
-    nw::Analysis analysis;
+    cr::Rng rng(7);
+    cr::Analysis analysis;
     long positions  = 0;
     long violations = 0;
 
     for (int game = 0; game < 40; ++game) {
-        chess::Board board(chess960_fen(static_cast<int>(rng.below(960))), true);
+        chess::Board board(cr::chess960_fen(static_cast<int>(rng.below(960))), true);
         for (int ply = 0; ply < 80; ++ply) {
             analysis.analyze_legal(board);
             analysis.analyze_pseudo(board);
@@ -331,17 +331,17 @@ TEST_CASE("the classifier agrees with the library on every possible move code", 
             for (int from = 0; from < 64; ++from) {
                 for (int to = 0; to < 64; ++to) {
                     for (int promo = 0; promo <= 4; ++promo) {
-                        const nw::Code code(from, to, promo);
-                        const nw::Reason reason = nw::classify(board, analysis, code);
-                        const bool legal        = analysis.legal_set.contains(code) || code == nw::Code::resign();
+                        const cr::Code code(from, to, promo);
+                        const cr::Reason reason = cr::classify(board, analysis, code);
+                        const bool legal        = analysis.legal_set.contains(code) || code == cr::Code::resign();
                         const bool pseudo_illegal =
                             analysis.pseudo_set.contains(code) && !analysis.legal_set.contains(code);
 
-                        if ((reason == nw::R_LEGAL) != legal) {
+                        if ((reason == cr::R_LEGAL) != legal) {
                             ++violations;
                         }
                         // king safety reasons are exactly the moves that follow the movement rules but are illegal
-                        if (reason != nw::R_LEGAL && (reason >= nw::KS_FIRST) != pseudo_illegal) {
+                        if (reason != cr::R_LEGAL && (reason >= cr::KS_FIRST) != pseudo_illegal) {
                             ++violations;
                         }
                     }
@@ -360,17 +360,17 @@ TEST_CASE("the classifier agrees with the library on every possible move code", 
 }
 
 TEST_CASE("every legal move is also pseudo-legal", "[rules][slow]") {
-    nw::Rng rng(11);
-    nw::Analysis analysis;
+    cr::Rng rng(11);
+    cr::Analysis analysis;
     long missing = 0;
 
     for (int game = 0; game < 200; ++game) {
-        chess::Board board(chess960_fen(static_cast<int>(rng.below(960))), true);
+        chess::Board board(cr::chess960_fen(static_cast<int>(rng.below(960))), true);
         for (int ply = 0; ply < 80; ++ply) {
             analysis.analyze_legal(board);
             analysis.analyze_pseudo(board);
             for (const chess::Move move : analysis.legal) {
-                if (!analysis.pseudo_set.contains(nw::Code::of(move))) {
+                if (!analysis.pseudo_set.contains(cr::Code::of(move))) {
                     ++missing;
                 }
             }
@@ -390,18 +390,18 @@ TEST_CASE("a position without any pseudo-legal move is a stalemate that still ge
     REQUIRE(position.analysis.no_moves);
     REQUIRE(position.analysis.pseudo.size() == 0);
     REQUIRE_FALSE(position.analysis.in_check);
-    REQUIRE(position.analysis.kind_available(nw::RESIGN));
-    REQUIRE_FALSE(position.analysis.kind_available(nw::KING));
+    REQUIRE(position.analysis.kind_available(cr::RESIGN));
+    REQUIRE_FALSE(position.analysis.kind_available(cr::KING));
 }
 
 TEST_CASE("legal play never reaches a position the library mishandles", "[rules][slow]") {
-    nw::Rng rng(2024);
-    nw::Analysis analysis;
+    cr::Rng rng(2024);
+    cr::Analysis analysis;
     long double_checks = 0;
     long untrusted     = 0;
 
     for (int game = 0; game < 3000; ++game) {
-        chess::Board board(chess960_fen(static_cast<int>(rng.below(960))), true);
+        chess::Board board(cr::chess960_fen(static_cast<int>(rng.below(960))), true);
         for (int ply = 0; ply < 120; ++ply) {
             analysis.analyze_legal(board);
             if (analysis.in_check) {
