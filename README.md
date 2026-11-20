@@ -67,21 +67,21 @@ loader = cr.make_loader("train.bin", batch_size=8192, num_workers=4)   # uint8 [
 for epoch in range(epochs):                                            # one iteration = one epoch
     for raw in loader:
         batch = cr.unpack(raw.to(device, non_blocking=True), resign_prob=0.1)
-        legal_logits = model(batch.board, batch.legal)                 # [B, 585], [B, 38]
+        legal_logits = model(batch.board, batch.legal)                 # [B, 586], [B, 38]
         illegal_logits = model(batch.board, batch.illegal)
         loss = bce(legal_logits, batch.legal_label) + bce(illegal_logits, batch.illegal_label)
 ```
 
 `batch` has the board once per record and the two moves separately, plus the bucket ids for metrics:
 
-| field                                  | shape      | content                                                                                                         |
-| -------------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------- |
-| `board`                                | `[B, 585]` | the 9 bitboards flattened (576, square a1 first), en passant file one-hot (8, zero if none), white to move (1)  |
-| `legal`, `illegal`                     | `[B, 38]`  | to rank (8), to file (8), from rank (8), from file (8), promotion none / N / B / R / Q (5), resign (1)          |
-| `legal_label`, `illegal_label`         | `[B]`      | the targets: always 1 for the legal move, 0 for the illegal move, 1 if the augmentation turned it into a resign |
-| `legal_code`, `illegal_code`           | `[B]`      | the integer move codes in the record                                                                            |
-| `legal_kind`, `illegal_reason`         | `[B]`      | bucket ids, names in `cr.KINDS` and `cr.REASONS`                                                                |
-| `legal_augmented`, `illegal_augmented` | `[B]`      | the augmentation set the resign flag of that move                                                               |
+| field                                  | shape      | content                                                                                                           |
+| -------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------- |
+| `board`                                | `[B, 586]` | the 9 bitboards flattened (576, square a1 first), en passant one-hot (9: files a-h, then none), white to move (1) |
+| `legal`, `illegal`                     | `[B, 38]`  | to rank (8), to file (8), from rank (8), from file (8), promotion N / B / R / Q / none (5), resign (1)            |
+| `legal_label`, `illegal_label`         | `[B]`      | the targets: always 1 for the legal move, 0 for the illegal move, 1 if the augmentation turned it into a resign   |
+| `legal_code`, `illegal_code`           | `[B]`      | the integer move codes in the record                                                                              |
+| `legal_kind`, `illegal_reason`         | `[B]`      | bucket ids, names in `cr.KINDS` and `cr.REASONS`                                                                  |
+| `legal_augmented`, `illegal_augmented` | `[B]`      | the augmentation set the resign flag of that move                                                                 |
 
 The slices `BOARD_*` and `MOVE_*` name the parts. Edit `move_vectors` if you want another convention.
 

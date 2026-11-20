@@ -85,7 +85,7 @@ RESIGN_KIND = KINDS.index("resign")
 
 BOARD_SIZE = 8
 NUM_SQUARES = BOARD_SIZE * BOARD_SIZE
-NUM_PROMOTIONS = 5  # none, knight, bishop, rook, queen
+NUM_PROMOTIONS = 5  # in a move code: 0 none, 1 knight, 2 bishop, 3 rook, 4 queen
 NUM_BITBOARDS = (
     9  # white, black, pawns, knights, bishops, rooks, queens, kings, castling rooks
 )
@@ -100,18 +100,18 @@ WHITE_TO_MOVE_BYTE = BITBOARD_BYTES + 5
 KIND_BYTE = BITBOARD_BYTES + 6
 REASON_BYTE = BITBOARD_BYTES + 7
 
-# Layout of `Batch.board` [B, 585]: the nine bitboards of the record flattened (square
-# a1 first, h8 last), the file of the last double pawn push one-hot, and a
-# white-to-move flag.
+# Layout of `Batch.board` [B, 586]: the nine bitboards of the record flattened (square
+# a1 first, h8 last), the file of the last double pawn push one-hot with an extra
+# "none" entry (files a-h are entries 0-7, none is entry 8, so exactly one is set),
+# and a white-to-move flag.
 BOARD_BITBOARDS = slice(0, NUM_BITBOARDS * NUM_SQUARES)  # 576
-BOARD_EN_PASSANT = slice(
-    BOARD_BITBOARDS.stop, BOARD_BITBOARDS.stop + BOARD_SIZE
-)  # zero if none
+BOARD_EN_PASSANT = slice(BOARD_BITBOARDS.stop, BOARD_BITBOARDS.stop + BOARD_SIZE + 1)
+BOARD_EN_PASSANT_NONE = BOARD_EN_PASSANT.stop - 1
 BOARD_WHITE_TO_MOVE = BOARD_EN_PASSANT.stop
-BOARD_FEATURES = BOARD_WHITE_TO_MOVE + 1  # 585
+BOARD_FEATURES = BOARD_WHITE_TO_MOVE + 1  # 586
 
 # Layout of a move vector [N, 38]: one-hot to rank, to file, from rank, from file,
-# promotion (none, knight, bishop, rook, queen) and a resign flag. Resign has no
+# promotion (knight, bishop, rook, queen, none) and a resign flag. Resign has no
 # squares: its four square groups are zero, its promotion is "none" and its resign
 # flag is set.
 MOVE_TO_RANK = slice(0, BOARD_SIZE)
@@ -119,6 +119,7 @@ MOVE_TO_FILE = slice(MOVE_TO_RANK.stop, MOVE_TO_RANK.stop + BOARD_SIZE)
 MOVE_FROM_RANK = slice(MOVE_TO_FILE.stop, MOVE_TO_FILE.stop + BOARD_SIZE)
 MOVE_FROM_FILE = slice(MOVE_FROM_RANK.stop, MOVE_FROM_RANK.stop + BOARD_SIZE)
 MOVE_PROMOTION = slice(MOVE_FROM_FILE.stop, MOVE_FROM_FILE.stop + NUM_PROMOTIONS)
+MOVE_PROMOTION_NONE = MOVE_PROMOTION.stop - 1  # the last promotion entry
 MOVE_RESIGN = MOVE_PROMOTION.stop
 MOVE_FEATURES = MOVE_RESIGN + 1  # 38
 
@@ -262,7 +263,7 @@ def make_loader(
 class Batch:
     """A batch of records as tensors, on the device of the raw bytes."""
 
-    board: torch.Tensor  # float [B, 585], see BOARD_*
+    board: torch.Tensor  # float [B, 586], see BOARD_*
     legal: torch.Tensor  # float [B, 38], move vector of the legal move, see MOVE_*
     illegal: torch.Tensor  # float [B, 38], move vector of the illegal move
     legal_label: torch.Tensor  # float [B], target of the legal move: always 1
@@ -306,10 +307,10 @@ def unpack(
     bitboard_bytes = records[:, :BITBOARD_BYTES].view(n, NUM_BITBOARDS, 8)
     bits = ((bitboard_bytes.unsqueeze(-1) >> shifts) & 1).view(n, -1)
 
-    files = torch.arange(BOARD_SIZE, dtype=torch.uint8, device=device)
-    en_passant = (files == records[:, EP_BYTE].unsqueeze(1)).to(
-        torch.uint8
-    )  # zero for NO_EP
+    # file of the last double push, or "none" (entry 8) for NO_EP
+    entries = torch.arange(BOARD_SIZE + 1, dtype=torch.uint8, device=device)
+    en_passant_entry = records[:, EP_BYTE].clamp(max=BOARD_SIZE).unsqueeze(1)
+    en_passant = (entries == en_passant_entry).to(torch.uint8)
     white_to_move = records[:, WHITE_TO_MOVE_BYTE].unsqueeze(1)
     board = torch.cat((bits, en_passant, white_to_move), dim=1).to(dtype)
 
@@ -365,5 +366,7 @@ def move_vectors(codes, dtype=torch.float32, resign=None):
         dim=1,
     )
     squares &= ~is_resign.unsqueeze(1)
-    promotion = functional.one_hot(codes >> 12, NUM_PROMOTIONS).to(torch.bool)
+    # the code has 0 = none, 1-4 = knight .. queen; the vector has knight .. queen, none
+    promotion_entry = ((codes >> 12) + NUM_PROMOTIONS - 1) % NUM_PROMOTIONS
+    promotion = functional.one_hot(promotion_entry, NUM_PROMOTIONS).to(torch.bool)
     return torch.cat((squares, promotion, flag.unsqueeze(1)), dim=1).to(dtype)
