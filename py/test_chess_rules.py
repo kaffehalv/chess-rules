@@ -294,10 +294,8 @@ def test_unpack_places_every_field_on_the_right_feature():
     assert batch.illegal_code.tolist() == [code(48, 56, 4)]
     assert batch.legal_kind.tolist() == [cr.KINDS.index("pawn_double")]
     assert batch.illegal_reason.tolist() == [cr.REASONS.index("blocked")]
-    assert not batch.legal_augmented.any()
-    assert not batch.illegal_augmented.any()
-    assert batch.legal_label.tolist() == [1.0]
-    assert batch.illegal_label.tolist() == [0.0]
+    assert not batch.augmented.any()
+    assert not batch.legal_from_illegal.any()
 
 
 def test_unpack_without_en_passant_and_black_to_move():
@@ -376,100 +374,108 @@ BEFORE_FLAG = slice(0, cr.MOVE_RESIGN)
 SQUARES = slice(cr.MOVE_TO_RANK.start, cr.MOVE_PROMOTION.start)
 
 
-def assert_only_the_flag_changed(batch, plain, side, mask):
-    """Check that the marked moves of a side differ in the flag only."""
-    moves, plain_moves = getattr(batch, side), getattr(plain, side)
-    assert torch.all(moves[mask][:, cr.MOVE_RESIGN] == 1)
-    assert torch.equal(moves[mask][:, BEFORE_FLAG], plain_moves[mask][:, BEFORE_FLAG])
-    assert torch.equal(moves[~mask], plain_moves[~mask])  # everything else is as it was
-    assert torch.equal(getattr(batch, f"{side}_code"), getattr(plain, f"{side}_code"))
-
-
-def test_without_augmentation_the_targets_are_legal_then_illegal(tmp_path):
+def synthetic_raw(tmp_path):
+    """Return the synthetic records as a raw uint8 tensor."""
     n = AUGMENTATION_RECORDS
-    plain = cr.unpack(read_raw(write_records(tmp_path / "d.bin", n), n))
-
-    assert torch.all(plain.legal_label == 1)
-    assert torch.all(plain.illegal_label == 0)
-    assert not plain.legal_augmented.any()
-    assert not plain.illegal_augmented.any()
+    return read_raw(write_records(tmp_path / "d.bin", n), n)
 
 
-def test_a_legal_move_can_be_turned_into_resign(tmp_path):
-    n = AUGMENTATION_RECORDS
-    raw = read_raw(write_records(tmp_path / "d.bin", n), n)
+def seeded(seed):
+    return torch.Generator().manual_seed(seed)
+
+
+def assert_nothing_else_changed(batch, plain):
+    """Check everything but the legal slot: the pair keeps its labels (1, 0)."""
+    assert torch.equal(batch.board, plain.board)
+    assert torch.equal(
+        batch.illegal, plain.illegal
+    )  # the illegal move is never augmented
+    assert torch.equal(batch.legal_code, plain.legal_code)
+    assert torch.equal(batch.illegal_code, plain.illegal_code)
+    assert torch.equal(batch.legal_kind, plain.legal_kind)
+    assert torch.equal(batch.illegal_reason, plain.illegal_reason)
+
+
+def test_without_augmentation_nothing_is_marked(tmp_path):
+    raw = synthetic_raw(tmp_path)
+    plain, batch = cr.unpack(raw), cr.unpack(raw, resign_prob=0.0)
+
+    assert not batch.augmented.any()
+    assert not batch.legal_from_illegal.any()
+    assert torch.equal(batch.legal, cr.move_vectors(plain.legal_code))
+    assert torch.equal(batch.legal, plain.legal)
+    assert_nothing_else_changed(batch, plain)
+
+
+def test_legal_and_resign(tmp_path):
+    """(legal move, illegal move) -> (legal move & resign, illegal move)"""
+    raw = synthetic_raw(tmp_path)
     plain = cr.unpack(raw)
+    batch = cr.unpack(raw, resign_prob=1.0, illegal_prob=0.0)
     natural = plain.legal_code == cr.RESIGN_CODE  # record 65 is a resign to begin with
     assert natural.sum() == 1
 
-    batch = cr.unpack(raw, resign_prob=1.0, illegal_prob=0.0)
-
-    assert torch.equal(batch.legal_augmented, ~natural)  # a resign is not "augmented"
-    assert not batch.illegal_augmented.any()
-    assert_only_the_flag_changed(batch, plain, "legal", batch.legal_augmented)
-    assert torch.all(
-        batch.legal[batch.legal_augmented][:, SQUARES].sum(dim=1) == len(SQUARE_GROUPS)
+    assert torch.equal(batch.augmented, ~natural)  # a resign is not "augmented"
+    assert not batch.legal_from_illegal.any()
+    changed = batch.augmented
+    assert torch.all(batch.legal[changed][:, cr.MOVE_RESIGN] == 1)
+    # only the flag differs: the squares and the promotion of the legal move are kept
+    assert torch.equal(
+        batch.legal[changed][:, BEFORE_FLAG], plain.legal[changed][:, BEFORE_FLAG]
     )
-    assert torch.equal(batch.legal_kind, plain.legal_kind)
-    assert torch.equal(batch.illegal, plain.illegal)  # the illegal move is untouched
-    assert torch.all(batch.legal_label == 1)
-    assert torch.all(batch.illegal_label == 0)
-    assert torch.equal(batch.board, plain.board)
+    kept = batch.legal[changed][:, SQUARES]
+    assert torch.all(kept.sum(dim=1) == len(SQUARE_GROUPS))  # not the squareless resign
+    assert torch.equal(batch.legal[~changed], plain.legal[~changed])
+    assert_nothing_else_changed(batch, plain)
 
 
-def test_an_illegal_move_can_be_turned_into_a_legal_resign(tmp_path):
-    n = AUGMENTATION_RECORDS
-    raw = read_raw(write_records(tmp_path / "d.bin", n), n)
+def test_illegal_and_resign(tmp_path):
+    """(legal move, illegal move) -> (illegal move & resign, illegal move)"""
+    raw = synthetic_raw(tmp_path)
     plain = cr.unpack(raw)
-
     batch = cr.unpack(raw, resign_prob=1.0, illegal_prob=1.0)
 
-    assert batch.illegal_augmented.all()
-    assert not batch.legal_augmented.any()
-    assert_only_the_flag_changed(batch, plain, "illegal", batch.illegal_augmented)
-    squares = batch.illegal[:, SQUARES]
-    assert torch.all(squares.sum(dim=1) == len(SQUARE_GROUPS))  # the squares are kept
-    assert torch.equal(batch.illegal_reason, plain.illegal_reason)
-    assert torch.equal(batch.legal, plain.legal)
-    assert torch.all(
-        batch.illegal_label == 1
-    )  # resign is legal, whatever the rest says
-    assert torch.all(batch.legal_label == 1)
-    assert torch.equal(batch.board, plain.board)
+    assert batch.augmented.all()
+    assert batch.legal_from_illegal.all()
+    # the legal slot has the squares and promotion of the illegal move, plus the flag
+    expected = cr.move_vectors(plain.illegal_code, resign=batch.augmented)
+    assert torch.equal(batch.legal, expected)
+    assert torch.equal(batch.legal[:, BEFORE_FLAG], plain.illegal[:, BEFORE_FLAG])
+    assert torch.all(batch.legal[:, cr.MOVE_RESIGN] == 1)
+    assert torch.all(batch.illegal[:, cr.MOVE_RESIGN] == 0)  # the flag tells them apart
+    assert torch.all(batch.legal[:, SQUARES].sum(dim=1) == len(SQUARE_GROUPS))
+    assert_nothing_else_changed(batch, plain)
 
 
-def test_each_augmented_record_changes_one_of_its_two_moves(tmp_path):
-    n = AUGMENTATION_RECORDS
-    raw = read_raw(write_records(tmp_path / "d.bin", n), n)
+def test_each_augmented_record_uses_one_of_its_two_moves(tmp_path):
+    raw = synthetic_raw(tmp_path)
     plain = cr.unpack(raw)
+    batch = cr.unpack(raw, resign_prob=1.0, generator=seeded(1))
     natural = plain.legal_code == cr.RESIGN_CODE
 
-    batch = cr.unpack(raw, resign_prob=1.0, generator=torch.Generator().manual_seed(1))
+    assert torch.all(batch.augmented[~natural])
+    assert not (batch.legal_from_illegal & ~batch.augmented).any()
+    from_illegal = batch.legal_from_illegal
+    from_legal = batch.augmented & ~from_illegal
+    assert from_illegal.float().mean().item() == pytest.approx(0.5, abs=0.1)
 
-    assert not (batch.legal_augmented & batch.illegal_augmented).any()
-    assert torch.all((batch.legal_augmented | batch.illegal_augmented)[~natural])
-    assert batch.illegal_augmented.float().mean().item() == pytest.approx(0.5, abs=0.1)
-    assert_only_the_flag_changed(batch, plain, "legal", batch.legal_augmented)
-    assert_only_the_flag_changed(batch, plain, "illegal", batch.illegal_augmented)
-    assert torch.equal(batch.illegal_label, batch.illegal_augmented.float())
-    assert torch.all(batch.legal_label == 1)
+    expected_from_legal = cr.move_vectors(plain.legal_code, resign=from_legal)
+    expected_from_illegal = cr.move_vectors(plain.illegal_code, resign=from_illegal)
+    assert torch.equal(batch.legal[from_legal], expected_from_legal[from_legal])
+    assert torch.equal(batch.legal[from_illegal], expected_from_illegal[from_illegal])
+    assert torch.equal(batch.legal[~batch.augmented], plain.legal[~batch.augmented])
+    assert_nothing_else_changed(batch, plain)
 
-    again = cr.unpack(raw, resign_prob=1.0, generator=torch.Generator().manual_seed(1))
-    assert torch.equal(batch.legal_augmented, again.legal_augmented)
-    assert torch.equal(batch.illegal_augmented, again.illegal_augmented)
+    again = cr.unpack(raw, resign_prob=1.0, generator=seeded(1))
+    assert torch.equal(batch.augmented, again.augmented)
+    assert torch.equal(batch.legal_from_illegal, again.legal_from_illegal)
+    assert torch.equal(batch.legal, again.legal)
 
 
 def test_resign_prob_is_the_share_of_augmented_records(tmp_path):
-    n = AUGMENTATION_RECORDS
-    raw = read_raw(write_records(tmp_path / "d.bin", n), n)
+    batch = cr.unpack(synthetic_raw(tmp_path), resign_prob=0.3, generator=seeded(2))
 
-    batch = cr.unpack(raw, resign_prob=0.3, generator=torch.Generator().manual_seed(2))
-    changed = batch.legal_augmented | batch.illegal_augmented
-    assert changed.float().mean().item() == pytest.approx(0.3, abs=0.06)
-
-    nothing = cr.unpack(raw, resign_prob=0.0)
-    assert not nothing.legal_augmented.any()
-    assert not nothing.illegal_augmented.any()
+    assert batch.augmented.float().mean().item() == pytest.approx(0.3, abs=0.06)
 
 
 def test_move_vectors_can_set_the_resign_flag_without_touching_the_rest():
