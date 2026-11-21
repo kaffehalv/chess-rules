@@ -11,10 +11,10 @@ byte by byte, so the code does not depend on the byte order of the machine.
     for _ in range(epochs):
         for raw in loader:  # uint8 [B, 80]
             batch = unpack(raw.to(device, non_blocking=True), resign_prob=0.1)
-            legal_logits = model(batch.board, batch.legal)
-            illegal_logits = model(batch.board, batch.illegal)
-            loss = bce(legal_logits, batch.legal_label)
-            loss += bce(illegal_logits, batch.illegal_label)
+            legal_logits = model(batch.board, batch.legal)  # target 1
+            illegal_logits = model(batch.board, batch.illegal)  # target 0
+            loss = bce(legal_logits, torch.ones_like(legal_logits))
+            loss += bce(illegal_logits, torch.zeros_like(illegal_logits))
 
 Shuffling: chess-rules writes its files already shuffled. Every epoch the batch
 boundaries are shifted by a random offset and the batches are visited in a
@@ -261,21 +261,25 @@ def make_loader(
 
 @dataclasses.dataclass
 class Batch:
-    """A batch of records as tensors, on the device of the raw bytes."""
+    """A batch of records as tensors, on the device of the raw bytes.
+
+    The targets never change: `legal` is a legal move (target 1) and `illegal` an
+    illegal move (target 0), also after the augmentation.
+    """
 
     board: torch.Tensor  # float [B, 586], see BOARD_*
-    legal: torch.Tensor  # float [B, 38], move vector of the legal move, see MOVE_*
-    illegal: torch.Tensor  # float [B, 38], move vector of the illegal move
-    legal_label: torch.Tensor  # float [B], target of the legal move: always 1
-    illegal_label: (
-        torch.Tensor
-    )  # float [B], target of the illegal move: 0, or 1 if augmented
-    legal_code: torch.Tensor  # int64 [B], the move code in the record
-    illegal_code: torch.Tensor  # int64 [B]
+    legal: torch.Tensor  # float [B, 38], the legal move vector, see MOVE_*
+    illegal: torch.Tensor  # float [B, 38], the illegal move vector, never augmented
+    legal_code: torch.Tensor  # int64 [B], the legal move code in the record
+    illegal_code: torch.Tensor  # int64 [B], the illegal move code in the record
     legal_kind: torch.Tensor  # int64 [B], index into KINDS
     illegal_reason: torch.Tensor  # int64 [B], index into REASONS
-    legal_augmented: torch.Tensor  # bool [B], the resign flag of `legal` was set
-    illegal_augmented: torch.Tensor  # bool [B], the resign flag of `illegal` was set
+    augmented: (
+        torch.Tensor
+    )  # bool [B], `legal` has the resign flag set by the augmentation
+    legal_from_illegal: (
+        torch.Tensor
+    )  # bool [B], `legal` has the squares of the illegal move
 
 
 def unpack(
@@ -283,13 +287,15 @@ def unpack(
 ):
     """Turn raw records (uint8 [B, 80], on any device) into a `Batch`.
 
-    Augmentation: a fraction `resign_prob` of the records is chosen. For each of them
-    the legal move (probability 1 - `illegal_prob`) or the illegal move (probability
-    `illegal_prob`) gets its resign flag set and nothing else changes: squares,
-    promotion, code, kind and reason stay as they are, so the network learns that the
-    rest of a resign move does not matter. Resign is legal, so an augmented illegal
-    move gets the target 1. `legal_augmented` and `illegal_augmented` mark the changed
-    moves; leave them out of metrics per kind and per reason.
+    Augmentation: a fraction `resign_prob` of the records is chosen. In each of them
+    the legal slot becomes a resign: `legal move & resign` (probability
+    `1 - illegal_prob`) or `illegal move & resign` (probability `illegal_prob`), where
+    `& resign` sets the resign flag and keeps the squares and the promotion. The
+    illegal slot and the targets (1, 0) never change, so the network learns that the
+    rest of a resign move does not matter. `augmented` marks the rows where the legal
+    slot was changed and `legal_from_illegal` those that took the squares of the
+    illegal move. Leave `augmented` rows out of the accuracy per legal kind; the
+    illegal side is never changed, so the accuracy per reason can use every row.
     """
     if records.dtype != torch.uint8 or tuple(records.shape[1:]) != (RECORD_BYTES,):
         message = (
@@ -322,27 +328,26 @@ def unpack(
     legal_kind = records[:, KIND_BYTE].to(torch.int64)
     illegal_reason = records[:, REASON_BYTE].to(torch.int64)
 
-    legal_augmented = torch.zeros(n, dtype=torch.bool, device=device)
-    illegal_augmented = torch.zeros(n, dtype=torch.bool, device=device)
+    augmented = torch.zeros(n, dtype=torch.bool, device=device)
+    legal_from_illegal = torch.zeros(n, dtype=torch.bool, device=device)
     if resign_prob > 0:
         chosen = torch.rand(n, generator=generator, device=device) < resign_prob
         use_illegal = torch.rand(n, generator=generator, device=device) < illegal_prob
-        illegal_augmented = chosen & use_illegal
+        legal_from_illegal = chosen & use_illegal
         # a legal move that already is a resign stays as it is
-        legal_augmented = chosen & ~use_illegal & (legal_code != RESIGN_CODE)
+        augmented = chosen & (use_illegal | (legal_code != RESIGN_CODE))
+    legal_source = torch.where(legal_from_illegal, illegal_code, legal_code)
 
     return Batch(
         board=board,
-        legal=move_vectors(legal_code, dtype, resign=legal_augmented),
-        illegal=move_vectors(illegal_code, dtype, resign=illegal_augmented),
-        legal_label=torch.ones(n, dtype=dtype, device=device),
-        illegal_label=illegal_augmented.to(dtype),
+        legal=move_vectors(legal_source, dtype, resign=augmented),
+        illegal=move_vectors(illegal_code, dtype),
         legal_code=legal_code,
         illegal_code=illegal_code,
         legal_kind=legal_kind,
         illegal_reason=illegal_reason,
-        legal_augmented=legal_augmented,
-        illegal_augmented=illegal_augmented,
+        augmented=augmented,
+        legal_from_illegal=legal_from_illegal,
     )
 
 
