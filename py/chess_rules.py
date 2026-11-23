@@ -3,24 +3,39 @@
 A dataset file is a flat array of 80 byte records (see the README). The loader
 keeps the CPU work to a minimum: worker processes only copy a batch of raw
 records out of a memory map. `unpack` then turns the raw bytes into tensors on
-whatever device they are on, normally the GPU, so a batch of 8192 examples
-costs 640 KB of transfer and no Python per-example work. Records are decoded
-byte by byte, so the code does not depend on the byte order of the machine.
+whatever device they are on, normally the GPU, so a batch of 8192 examples costs
+640 KB of transfer and no Python per-example work.
 
     loader = make_loader("train.bin", batch_size=8192, num_workers=4)
     for _ in range(epochs):
         for raw in loader:  # uint8 [B, 80]
             batch = unpack(raw.to(device, non_blocking=True), resign_prob=0.1)
-            legal_logits = model(batch.board, batch.legal)  # target 1
-            illegal_logits = model(batch.board, batch.illegal)  # target 0
-            loss = bce(legal_logits, torch.ones_like(legal_logits))
-            loss += bce(illegal_logits, torch.zeros_like(illegal_logits))
+            ...
 
 Shuffling: chess-rules writes its files already shuffled. Every epoch the batch
 boundaries are shifted by a random offset and the batches are visited in a
 random order, so batches change from epoch to epoch without any random access
 to the file. Everything is a pure function of (seed, epoch), which makes runs
 reproducible and lets persistent workers and resumed runs agree.
+
+Layout of the tensors: `unpack` gives 8x8 planes seen from the side to move. The
+board is mirrored vertically and the colours are swapped when black is to move, so
+"us" always plays up the board and the side to move is never an input. This is a
+symmetry of the rules, also for Chess960 and for castling (castling is "king takes
+own rook", files do not change), see test_chess_rules.py.
+
+Board planes [B, 15, 8, 8], plane [rank, file], rank 0 is our back rank:
+
+    0-5    our pawns, knights, bishops, rooks, queens, kings
+    6-11   their pawns, knights, bishops, rooks, queens, kings
+    12     our rooks that still have a castling right
+    13     their rooks that still have a castling right
+    14     the en passant target square (always on rank 5), all zero if there is none
+
+A move is a vector [B, 134], flipped the same way: a from-square plane (64), a
+to-square plane (64), the promotion one-hot (knight, bishop, rook, queen, none) and
+the resign flag. Resign has no squares. `split_move` cuts it into planes and scalars.
+The legal slot can be augmented into a resign, see `unpack`.
 """
 
 from __future__ import annotations
@@ -81,7 +96,6 @@ REASONS = [
     "ks_castling",
     "ks_ep",
 ]
-RESIGN_KIND = KINDS.index("resign")
 
 BOARD_SIZE = 8
 NUM_SQUARES = BOARD_SIZE * BOARD_SIZE
@@ -100,28 +114,21 @@ WHITE_TO_MOVE_BYTE = BITBOARD_BYTES + 5
 KIND_BYTE = BITBOARD_BYTES + 6
 REASON_BYTE = BITBOARD_BYTES + 7
 
-# Layout of `Batch.board` [B, 586]: the nine bitboards of the record flattened (square
-# a1 first, h8 last), the file of the last double pawn push one-hot with an extra
-# "none" entry (files a-h are entries 0-7, none is entry 8, so exactly one is set),
-# and a white-to-move flag.
-BOARD_BITBOARDS = slice(0, NUM_BITBOARDS * NUM_SQUARES)  # 576
-BOARD_EN_PASSANT = slice(BOARD_BITBOARDS.stop, BOARD_BITBOARDS.stop + BOARD_SIZE + 1)
-BOARD_EN_PASSANT_NONE = BOARD_EN_PASSANT.stop - 1
-BOARD_WHITE_TO_MOVE = BOARD_EN_PASSANT.stop
-BOARD_FEATURES = BOARD_WHITE_TO_MOVE + 1  # 586
+NUM_BOARD_PLANES = 15
+US_PIECES = slice(0, 6)
+THEM_PIECES = slice(6, 12)
+US_CASTLING_ROOKS = 12
+THEM_CASTLING_ROOKS = 13
+EN_PASSANT_TARGET = 14
+EN_PASSANT_RANK = 5  # the target square of an en passant capture, from our side
 
-# Layout of a move vector [N, 38]: one-hot to rank, to file, from rank, from file,
-# promotion (knight, bishop, rook, queen, none) and a resign flag. Resign has no
-# squares: its four square groups are zero, its promotion is "none" and its resign
-# flag is set.
-MOVE_TO_RANK = slice(0, BOARD_SIZE)
-MOVE_TO_FILE = slice(MOVE_TO_RANK.stop, MOVE_TO_RANK.stop + BOARD_SIZE)
-MOVE_FROM_RANK = slice(MOVE_TO_FILE.stop, MOVE_TO_FILE.stop + BOARD_SIZE)
-MOVE_FROM_FILE = slice(MOVE_FROM_RANK.stop, MOVE_FROM_RANK.stop + BOARD_SIZE)
-MOVE_PROMOTION = slice(MOVE_FROM_FILE.stop, MOVE_FROM_FILE.stop + NUM_PROMOTIONS)
-MOVE_PROMOTION_NONE = MOVE_PROMOTION.stop - 1  # the last promotion entry
+MOVE_FROM = slice(0, NUM_SQUARES)
+MOVE_TO = slice(NUM_SQUARES, 2 * NUM_SQUARES)
+MOVE_PROMOTION = slice(2 * NUM_SQUARES, 2 * NUM_SQUARES + NUM_PROMOTIONS)
 MOVE_RESIGN = MOVE_PROMOTION.stop
-MOVE_FEATURES = MOVE_RESIGN + 1  # 38
+MOVE_FEATURES = MOVE_RESIGN + 1  # 134
+MOVE_SCALARS = NUM_PROMOTIONS + 1  # promotion one-hot and the resign flag
+MIRROR = BOARD_SIZE * (BOARD_SIZE - 1)  # square ^ 56 mirrors the ranks
 
 
 class ChessRulesDataset(Dataset):
@@ -157,8 +164,8 @@ class ChessRulesDataset(Dataset):
             return (self.num_records - (self.batch_size - 1)) // self.batch_size
         return self.num_records // self.batch_size
 
-    def __getitem__(self, item):
-        epoch, k = item
+    def __getitem__(self, index):
+        epoch, k = index
         if not 0 <= k < len(self):
             raise IndexError(k)
         offset, order = self.plan(epoch)
@@ -259,27 +266,66 @@ def make_loader(
     )
 
 
+def check_records(records):
+    """Validate raw records (uint8 [B, 80]) and return their count and device."""
+    if records.dtype != torch.uint8 or tuple(records.shape[1:]) != (RECORD_BYTES,):
+        message = (
+            f"expected a uint8 tensor of shape [B, {RECORD_BYTES}], "
+            f"got {records.dtype} {tuple(records.shape)}"
+        )
+        raise ValueError(message)
+    return records.shape[0], records.device
+
+
+def decode_moves(records):
+    """Return the legal and illegal move codes, the kind and the reason of records."""
+    move_bytes = records[:, MOVE_BYTES].to(
+        torch.int64
+    )  # legal and illegal, 2 bytes each
+    return (
+        move_bytes[:, 0] | move_bytes[:, 1] << 8,
+        move_bytes[:, 2] | move_bytes[:, 3] << 8,
+        records[:, KIND_BYTE].to(torch.int64),
+        records[:, REASON_BYTE].to(torch.int64),
+    )
+
+
+def choose_legal_slot(legal_code, illegal_code, resign_prob, illegal_prob, generator):
+    """Choose what fills the legal slot of every record (see `unpack`).
+
+    Return the move code of the legal slot, `augmented` and `legal_from_illegal`.
+    """
+    n, device = legal_code.shape[0], legal_code.device
+    augmented = torch.zeros(n, dtype=torch.bool, device=device)
+    legal_from_illegal = torch.zeros(n, dtype=torch.bool, device=device)
+    if resign_prob > 0:
+        chosen = torch.rand(n, generator=generator, device=device) < resign_prob
+        use_illegal = torch.rand(n, generator=generator, device=device) < illegal_prob
+        legal_from_illegal = chosen & use_illegal
+        # a legal move that already is a resign stays as it is
+        augmented = chosen & (use_illegal | (legal_code != RESIGN_CODE))
+    legal_source = torch.where(legal_from_illegal, illegal_code, legal_code)
+    return legal_source, augmented, legal_from_illegal
+
+
 @dataclasses.dataclass
 class Batch:
-    """A batch of records as tensors, on the device of the raw bytes.
+    """A batch of records as planes, on the device of the raw bytes."""
 
-    The targets never change: `legal` is a legal move (target 1) and `illegal` an
-    illegal move (target 0), also after the augmentation.
-    """
-
-    board: torch.Tensor  # float [B, 586], see BOARD_*
-    legal: torch.Tensor  # float [B, 38], the legal move vector, see MOVE_*
-    illegal: torch.Tensor  # float [B, 38], the illegal move vector, never augmented
-    legal_code: torch.Tensor  # int64 [B], the legal move code in the record
-    illegal_code: torch.Tensor  # int64 [B], the illegal move code in the record
-    legal_kind: torch.Tensor  # int64 [B], index into KINDS
-    illegal_reason: torch.Tensor  # int64 [B], index into REASONS
+    board: torch.Tensor  # float [B, 15, 8, 8], seen from the side to move
+    legal: torch.Tensor  # float [B, 134], the legal move, flipped like the board
+    illegal: torch.Tensor  # float [B, 134], the illegal move, never augmented
+    legal_code: torch.Tensor  # int64 [B], the codes in the record (not flipped)
+    illegal_code: torch.Tensor  # int64 [B]
+    legal_kind: torch.Tensor  # int64 [B], index into chess_rules.KINDS
+    illegal_reason: torch.Tensor  # int64 [B], index into chess_rules.REASONS
     augmented: (
         torch.Tensor
     )  # bool [B], `legal` has the resign flag set by the augmentation
     legal_from_illegal: (
         torch.Tensor
     )  # bool [B], `legal` has the squares of the illegal move
+    black_to_move: torch.Tensor  # bool [B], the position was mirrored
 
 
 def unpack(
@@ -291,87 +337,96 @@ def unpack(
     the legal slot becomes a resign: `legal move & resign` (probability
     `1 - illegal_prob`) or `illegal move & resign` (probability `illegal_prob`), where
     `& resign` sets the resign flag and keeps the squares and the promotion. The
-    illegal slot and the targets (1, 0) never change, so the network learns that the
-    rest of a resign move does not matter. `augmented` marks the rows where the legal
-    slot was changed and `legal_from_illegal` those that took the squares of the
-    illegal move. Leave `augmented` rows out of the accuracy per legal kind; the
-    illegal side is never changed, so the accuracy per reason can use every row.
+    illegal slot and the targets (1 for `legal`, 0 for `illegal`) never change, so the
+    network learns that the rest of a resign move does not matter. `augmented` marks
+    the rows where the legal slot was changed and `legal_from_illegal` those that took
+    the squares of the illegal move. Leave `augmented` rows out of the accuracy per
+    legal kind; the illegal side is never changed, so the accuracy per reason can use
+    every row.
     """
-    if records.dtype != torch.uint8 or tuple(records.shape[1:]) != (RECORD_BYTES,):
-        message = (
-            f"expected a uint8 tensor of shape [B, {RECORD_BYTES}], "
-            f"got {records.dtype} {tuple(records.shape)}"
-        )
-        raise ValueError(message)
-    n = records.shape[0]
-    device = records.device
+    n, device = check_records(records)
+    white_to_move = records[:, WHITE_TO_MOVE_BYTE].bool()
+    black_to_move = ~white_to_move
 
-    # Bit k of byte j of a bitboard is square 8 * j + k (a1 = 0, h1 = 7, a8 = 56). Bytes
-    # are shifted as uint8, which is 8 times less memory than going through int64 and
-    # does not depend on byte order.
-    shifts = torch.arange(8, dtype=torch.uint8, device=device)
+    # Byte j of a bitboard is rank j, so reversing the bytes mirrors the board.
     bitboard_bytes = records[:, :BITBOARD_BYTES].view(n, NUM_BITBOARDS, 8)
-    bits = ((bitboard_bytes.unsqueeze(-1) >> shifts) & 1).view(n, -1)
+    bitboard_bytes = torch.where(
+        white_to_move.view(n, 1, 1), bitboard_bytes, bitboard_bytes.flip(-1)
+    )
+    shifts = torch.arange(8, dtype=torch.uint8, device=device)
+    bits = ((bitboard_bytes.unsqueeze(-1) >> shifts) & 1).view(
+        n, NUM_BITBOARDS, NUM_SQUARES
+    )
 
-    # file of the last double push, or "none" (entry 8) for NO_EP
-    entries = torch.arange(BOARD_SIZE + 1, dtype=torch.uint8, device=device)
-    en_passant_entry = records[:, EP_BYTE].clamp(max=BOARD_SIZE).unsqueeze(1)
-    en_passant = (entries == en_passant_entry).to(torch.uint8)
-    white_to_move = records[:, WHITE_TO_MOVE_BYTE].unsqueeze(1)
-    board = torch.cat((bits, en_passant, white_to_move), dim=1).to(dtype)
+    white, black = bits[:, 0], bits[:, 1]
+    us = torch.where(white_to_move.view(n, 1), white, black)
+    them = torch.where(white_to_move.view(n, 1), black, white)
+    pieces = bits[:, 2:8]
+    castling = bits[:, 8]
 
-    move_bytes = records[:, MOVE_BYTES].to(
-        torch.int64
-    )  # legal and illegal, 2 bytes each
-    legal_code = move_bytes[:, 0] | move_bytes[:, 1] << 8
-    illegal_code = move_bytes[:, 2] | move_bytes[:, 3] << 8
-    legal_kind = records[:, KIND_BYTE].to(torch.int64)
-    illegal_reason = records[:, REASON_BYTE].to(torch.int64)
+    files = torch.arange(BOARD_SIZE, dtype=torch.uint8, device=device)
+    en_passant = torch.zeros(n, NUM_SQUARES, dtype=torch.uint8, device=device)
+    first = EN_PASSANT_RANK * BOARD_SIZE
+    en_passant[:, first : first + BOARD_SIZE] = files == records[:, EP_BYTE].unsqueeze(
+        1
+    )
 
-    augmented = torch.zeros(n, dtype=torch.bool, device=device)
-    legal_from_illegal = torch.zeros(n, dtype=torch.bool, device=device)
-    if resign_prob > 0:
-        chosen = torch.rand(n, generator=generator, device=device) < resign_prob
-        use_illegal = torch.rand(n, generator=generator, device=device) < illegal_prob
-        legal_from_illegal = chosen & use_illegal
-        # a legal move that already is a resign stays as it is
-        augmented = chosen & (use_illegal | (legal_code != RESIGN_CODE))
-    legal_source = torch.where(legal_from_illegal, illegal_code, legal_code)
+    planes = torch.cat(
+        (
+            pieces * us.unsqueeze(1),
+            pieces * them.unsqueeze(1),
+            (castling * us).unsqueeze(1),
+            (castling * them).unsqueeze(1),
+            en_passant.unsqueeze(1),
+        ),
+        dim=1,
+    )
+    board = planes.to(dtype).view(n, NUM_BOARD_PLANES, BOARD_SIZE, BOARD_SIZE)
 
+    legal_code, illegal_code, legal_kind, illegal_reason = decode_moves(records)
+    legal_source, augmented, legal_from_illegal = choose_legal_slot(
+        legal_code, illegal_code, resign_prob, illegal_prob, generator
+    )
     return Batch(
         board=board,
-        legal=move_vectors(legal_source, dtype, resign=augmented),
-        illegal=move_vectors(illegal_code, dtype),
+        legal=move_vectors(legal_source, black_to_move, dtype, resign=augmented),
+        illegal=move_vectors(illegal_code, black_to_move, dtype),
         legal_code=legal_code,
         illegal_code=illegal_code,
         legal_kind=legal_kind,
         illegal_reason=illegal_reason,
         augmented=augmented,
         legal_from_illegal=legal_from_illegal,
+        black_to_move=black_to_move,
     )
 
 
-def move_vectors(codes, dtype=torch.float32, resign=None):
-    """Return the move vectors [N, 38] of move codes (int64 [N]), see MOVE_*.
+def move_vectors(codes, black_to_move, dtype=torch.float32, resign=None):
+    """Return the move vectors [N, 134] of move codes (int64 [N]) from the mover's side.
 
-    The resign code gets the resign vector. `resign` (bool [N]) additionally sets the
-    resign flag of the marked rows and leaves their squares and promotion as they are.
+    The resign code gets the squareless resign vector. `resign` (bool [N]) additionally
+    sets the resign flag of the marked rows and keeps their squares and promotion.
     """
     is_resign = codes == RESIGN_CODE
     flag = is_resign if resign is None else is_resign | resign
-    origin = (codes >> 6) & (NUM_SQUARES - 1)
-    to = codes & (NUM_SQUARES - 1)
-    ranks_and_files = torch.arange(BOARD_SIZE, device=codes.device)
+    mirror = black_to_move.to(torch.int64) * MIRROR
+    origin = ((codes >> 6) & (NUM_SQUARES - 1)) ^ mirror
+    to = (codes & (NUM_SQUARES - 1)) ^ mirror
 
-    def one_hot(index):
-        return ranks_and_files == index.unsqueeze(1)
-
-    squares = torch.cat(
-        (one_hot(to >> 3), one_hot(to & 7), one_hot(origin >> 3), one_hot(origin & 7)),
-        dim=1,
-    )
-    squares &= ~is_resign.unsqueeze(1)
+    squares = torch.arange(NUM_SQUARES, device=codes.device)
+    keep = ~is_resign.unsqueeze(1)
+    from_plane = (squares == origin.unsqueeze(1)) & keep
+    to_plane = (squares == to.unsqueeze(1)) & keep
     # the code has 0 = none, 1-4 = knight .. queen; the vector has knight .. queen, none
-    promotion_entry = ((codes >> 12) + NUM_PROMOTIONS - 1) % NUM_PROMOTIONS
-    promotion = functional.one_hot(promotion_entry, NUM_PROMOTIONS).to(torch.bool)
-    return torch.cat((squares, promotion, flag.unsqueeze(1)), dim=1).to(dtype)
+    entry = ((codes >> 12) + NUM_PROMOTIONS - 1) % NUM_PROMOTIONS
+    promotion = functional.one_hot(entry, NUM_PROMOTIONS).to(torch.bool)
+    return torch.cat((from_plane, to_plane, promotion, flag.unsqueeze(1)), dim=1).to(
+        dtype
+    )
+
+
+def split_move(move):
+    """Cut move vectors [N, 134] into from/to planes [N, 2, 8, 8] and scalars [N, 6]."""
+    planes = move[:, : MOVE_TO.stop]
+    scalars = move[:, MOVE_PROMOTION.start :]
+    return planes.reshape(-1, 2, BOARD_SIZE, BOARD_SIZE), scalars
