@@ -50,59 +50,75 @@ pip install -r tools/requirements.txt
 python3 tools/audit.py data/train.bin --sample 100000 --leak data/eval.bin data/test.bin
 ```
 
-## Training data in PyTorch
+## Python loader
 
-`py/chess_rules.py` is the input pipeline. Worker processes only copy batches of raw 80 byte records out of a
-memory map; `unpack` turns them into tensors on the device they are on, normally the GPU.
+`py/chess_rules.py` reads the dataset files and turns them into PyTorch tensors: worker processes only copy batches
+of raw 80 byte records out of a memory map, and `unpack` makes the tensors on whatever device they are on, normally the
+GPU. It is independent of any model. To use it from another project, add this repository as a git submodule and install
+it, or put `py/` on the `PYTHONPATH`:
+
+```shell
+    pip install -e path/to/chess_rules          # installs the module chess_rules (needs numpy and torch)
+```
+
+To run its tests:
 
 ```shell
 pip install -r py/requirements.txt
 cd py && python3 -m pytest -q
 ```
 
+The tests with real data use `build/chess-rules` (or `$CR_BIN`) and are skipped if there is no binary.
+
+### Loading
+
 ```python
+import torch
 import chess_rules as cr
 
 loader = cr.make_loader("train.bin", batch_size=8192, num_workers=4)   # uint8 [B, 80] per batch
 for epoch in range(epochs):                                            # one iteration = one epoch
     for raw in loader:
         batch = cr.unpack(raw.to(device, non_blocking=True), resign_prob=0.1)
-        legal_logits = model(batch.board, batch.legal)                 # [B, 586], [B, 38]
-        illegal_logits = model(batch.board, batch.illegal)
-        loss = bce(legal_logits, torch.ones_like(legal_logits))        # legal: target 1
-        loss += bce(illegal_logits, torch.zeros_like(illegal_logits))  # illegal: target 0
+        boards = torch.cat((batch.board, batch.board))                 # [2B, 15, 8, 8]
+        moves = torch.cat((batch.legal, batch.illegal))                # [2B, 134]
+        # targets: 1 for the first B rows (legal), 0 for the last B rows (illegal)
 ```
 
-`batch` has the board once per record and the two moves separately, plus the bucket ids for metrics:
-
-| field                          | shape      | content                                                                                                           |
-| ------------------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------- |
-| `board`                        | `[B, 586]` | the 9 bitboards flattened (576, square a1 first), en passant one-hot (9: files a-h, then none), white to move (1) |
-| `legal`, `illegal`             | `[B, 38]`  | to rank (8), to file (8), from rank (8), from file (8), promotion N / B / R / Q / none (5), resign (1)            |
-| `legal_code`, `illegal_code`   | `[B]`      | the integer move codes in the record                                                                              |
-| `legal_kind`, `illegal_reason` | `[B]`      | bucket ids, names in `cr.KINDS` and `cr.REASONS`                                                                  |
-| `augmented`                    | `[B]`      | the augmentation replaced the legal slot of this row by a resign                                                  |
-| `legal_from_illegal`           | `[B]`      | ... and it took the squares and the promotion of the illegal move                                                 |
-
-The targets never change: `legal` is always a legal move (target 1) and `illegal` always an illegal one (target 0).
-
-The slices `BOARD_*` and `MOVE_*` name the parts. Edit `move_vectors` if you want another convention.
-
-- **Shuffling:** chess-rules writes shuffled files. Each epoch the batch boundaries move by a random offset and the batches
+- **Shuffling:** nwgen writes shuffled files. Each epoch the batch boundaries move by a random offset and the batches
   are visited in a random order, so there is no random access to the file. The order is a pure function of
   `(seed, epoch)`: runs are reproducible, persistent workers follow the epochs, and `start_epoch=` resumes a run.
-- **Resign augmentation:** `resign_prob` is the share of records that is augmented. In each of them the legal slot
-  becomes a resign, either `legal move & resign` (probability `1 - illegal_prob`) or `illegal move & resign`
-  (probability `illegal_prob`, default 0.5), where `& resign` sets the resign flag and keeps the squares and the
-  promotion. The illegal slot and the targets (1, 0) never change, so the network learns that the rest of a resign
-  move does not matter; with `illegal_move & resign` the two moves of a row differ only in the flag. A legal move
-  that already is a resign is not changed by the first kind. `augmented` and `legal_from_illegal` mark the rows;
-  leave `augmented` rows out of the accuracy per legal kind. The illegal side is never changed, so the accuracy per
-  illegal reason can use every row. A natural resign (no legal move in the position) has no squares: its square
-  groups are zero, its promotion is "none" and its resign flag is set.
 - **Distributed:** `rank=` and `world_size=` give every process its own share of every epoch.
-- **Per-bucket metrics:** accuracy per legal kind from the legal pass grouped by `legal_kind` (without the `augmented`
-  rows), accuracy per illegal reason from the illegal pass grouped by `illegal_reason` (all rows).
+
+### The planes layout
+
+The tensors are 8x8 planes seen from the side to move: when black is to move the board is mirrored vertically and the
+colours are swapped, so the side to move is never an input and "us" always plays up the board. This is a symmetry of
+the rules, also for Chess960 and castling; `test_nwgen_data.py` checks it against python-chess (`Board.mirror()`)
+for every record of a generated dataset.
+
+| field                             | shape           | content                                                                                                                                               |
+| --------------------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `board`                           | `[B, 15, 8, 8]` | our P N B R Q K (0-5), their P N B R Q K (6-11), our and their castling rooks (12, 13), the en passant target square on rank 5 (14, all zero if none) |
+| `legal`, `illegal`                | `[B, 134]`      | from-square plane (64), to-square plane (64), promotion N B R Q none (5), resign flag (1), flipped like the board                                     |
+| `legal_code`, `illegal_code`      | `[B]`           | the move codes in the record, not flipped                                                                                                             |
+| `legal_kind`, `illegal_reason`    | `[B]`           | bucket ids, names in `cr.KINDS` and `cr.REASONS`                                                                                                      |
+| `augmented`, `legal_from_illegal` | `[B]`           | see the augmentation                                                                                                                                  |
+| `black_to_move`                   | `[B]`           | the position was mirrored                                                                                                                             |
+
+The targets never change: `legal` is always a legal move (target 1) and `illegal` always an illegal one (target 0).
+`cr.split_move(move)` cuts a move vector into planes `[N, 2, 8, 8]` and scalars `[N, 6]`. Resign has no squares: a
+natural resign (no legal move in the position) has both square planes zero, its promotion is "none" and its resign
+flag is set.
+
+**Resign augmentation:** `resign_prob` is the share of records that is augmented. In each of them the legal slot
+becomes a resign, either `legal move & resign` (probability `1 - illegal_prob`) or `illegal move & resign`
+(probability `illegal_prob`, default 0.5), where `& resign` sets the resign flag and keeps the squares and the
+promotion. The illegal slot and the targets never change, so the network learns that the rest of a resign move does
+not matter; with `illegal_move & resign` the two moves of a row differ only in the flag. A legal move that already is
+a resign is not changed by the first kind. `augmented` and `legal_from_illegal` mark the rows. Leave `augmented` rows
+out of the accuracy per legal kind; the illegal side is never changed, so the accuracy per illegal reason can use every
+row.
 
 ## Record layout (80 bytes, little endian)
 
